@@ -46,7 +46,7 @@ struct State {
 static STATE: RwLock<Option<State>> = RwLock::new(None);
 
 fn path() -> PathBuf {
-    std::env::var_os("SSX3_SETTINGS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("saves/ssx3-settings.cfg"))
+    std::env::var_os("SSX3_SETTINGS").map(PathBuf::from).unwrap_or_else(|| ssx3_core::data_dir::path("saves/ssx3-settings.cfg"))
 }
 
 fn parse(text: &str) -> BTreeMap<String, String> {

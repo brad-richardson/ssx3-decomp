@@ -10,6 +10,7 @@
 //! This crate intentionally has no dependencies so it can be reused by the
 //! recompiler, the runtime, and tests alike.
 
+pub mod data_dir;
 pub mod devices;
 pub mod elf;
 pub mod gs;

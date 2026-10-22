@@ -12,6 +12,9 @@
 //!   used instead of the texture, any size (keep the original's aspect ratio;
 //!   texture coordinates are normalised), with a full mipmap chain.
 //!
+//! Both folders are in the data directory where there is one
+//! (`ssx3_core::data_dir`).
+//!
 //! Alpha: the GS's is 0..0x80 (0x80 = opaque). The PNGs hold it ×2 (0xFF =
 //! opaque), and replacements are scaled back.
 
@@ -40,14 +43,14 @@ pub struct Pack {
 
 impl Pack {
     pub fn from_env() -> Pack {
-        let dump = std::env::var("SSX3_TEX_DUMP").ok().filter(|v| !v.is_empty() && v != "0").map(|v| if v == "1" { PathBuf::from("textures/dump") } else { PathBuf::from(v) });
+        let dump = std::env::var("SSX3_TEX_DUMP").ok().filter(|v| !v.is_empty() && v != "0").map(|v| if v == "1" { ssx3_core::data_dir::path("textures/dump") } else { PathBuf::from(v) });
         if let Some(d) = &dump {
             match std::fs::create_dir_all(d) {
                 Ok(()) => eprintln!("[gfx] dumping textures to {}", d.display()),
                 Err(e) => eprintln!("[gfx] cannot create {}: {e}", d.display()),
             }
         }
-        let dir = std::env::var("SSX3_TEX_REPLACE").unwrap_or_else(|_| "textures/replace".into());
+        let dir = std::env::var("SSX3_TEX_REPLACE").unwrap_or_else(|_| ssx3_core::data_dir::path("textures/replace").display().to_string());
         let mut replace = HashMap::new();
         if dir != "0" {
             if let Ok(rd) = std::fs::read_dir(&dir) {

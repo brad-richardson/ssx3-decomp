@@ -1,7 +1,7 @@
 //! Boot the recompiled game: machine setup shared by the windowed and
 //! headless front ends.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ssx3_ps2::{machine, Cpu};
 
@@ -41,7 +41,7 @@ pub fn boot(skip_movies_default: bool) -> Box<Cpu> {
     }
     let iso = std::env::var("SSX3_ISO")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root().join("SSX 3 (USA).iso"));
+        .unwrap_or_else(|_| ssx3_core::data_dir::get().map_or_else(repo_root, Path::to_path_buf).join("SSX 3 (USA).iso"));
     if let Err(e) = ssx3_ps2::m!(c).sif.open_disc(iso.clone()) {
         eprintln!("warning: cannot open disc image {}: {e}", iso.display());
     }

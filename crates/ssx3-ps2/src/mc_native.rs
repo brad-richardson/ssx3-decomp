@@ -48,11 +48,11 @@ fn slot() -> &'static Mutex<Option<Slot>> {
     S.get_or_init(|| Mutex::new(open_card()))
 }
 
-/// The card in port 1: `SSX3_MEMCARD` (default `saves/ssx3-mc0.ps2`;
-/// `none` = empty slot). A missing file is created erased (the game offers
-/// to format it).
+/// The card in port 1: `SSX3_MEMCARD` (default `saves/ssx3-mc0.ps2`, in the
+/// data directory where there is one; `none` = empty slot). A missing file is
+/// created erased (the game offers to format it).
 fn open_card() -> Option<Slot> {
-    let p = std::env::var("SSX3_MEMCARD").unwrap_or_else(|_| "saves/ssx3-mc0.ps2".into());
+    let p = std::env::var("SSX3_MEMCARD").unwrap_or_else(|_| ssx3_core::data_dir::path("saves/ssx3-mc0.ps2").display().to_string());
     if p.is_empty() || p == "none" {
         eprintln!("[mc] no memory card inserted (SSX3_MEMCARD=none)");
         return None;

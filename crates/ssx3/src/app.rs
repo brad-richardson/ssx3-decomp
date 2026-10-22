@@ -238,10 +238,12 @@ impl ApplicationHandler for App {
                             #[cfg(not(feature = "emu-gs"))]
                             None => (0, 0),
                         };
-                        let path = format!("/tmp/ssx3-shot-{}.png", self.shots);
+                        // In /tmp (the data directory where there is one).
+                        let dir = ssx3_core::data_dir::get().unwrap_or(std::path::Path::new("/tmp"));
+                        let path = dir.join(format!("ssx3-shot-{}.png", self.shots));
                         self.shots += 1;
                         let _ = std::fs::write(&path, png::encode(w, h, &self.frame));
-                        eprintln!("screenshot: {path}");
+                        eprintln!("screenshot: {}", path.display());
                     }
                     if let Some(bit) = pad_bit(code) {
                         if event.state == ElementState::Pressed {

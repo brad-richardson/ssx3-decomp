@@ -7,3 +7,5 @@ license.workspace = true
 
 [dependencies]
 cpal = "0.15"
+# The memory card's default location (data_dir).
+ssx3-core.workspace = true
