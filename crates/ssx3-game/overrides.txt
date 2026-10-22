@@ -2024,6 +2024,7 @@
 0x00144368    FocusMan_CollectOctreeNode
 0x0034dd18    AnimObject_BuildMatrices
 0x00334458    OverlapList_CollideObjects
+0x00334888    Collide_VolumeObject
 0x00390c60    VfxScreenTint_Update
 0x002f00a0    PS2VisualEffectsMan_ApplyWorldPainter
 0x00231840    GameModule_CheckPauseRequest
