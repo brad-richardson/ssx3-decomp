@@ -174,6 +174,13 @@ fn start_device() -> Option<Ring> {
     }
 }
 
+// Android: cpal's backend there (oboe) is C++, linked against the NDK's
+// static libc++ (`c++_static`), which leaves the C++ ABI runtime
+// (`__cxa_pure_virtual`, ...) to `libc++abi.a`: link that too.
+#[cfg(target_os = "android")]
+#[link(name = "c++abi")]
+extern "C" {}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn open_stream(ring: Ring) -> Result<cpal::Stream, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

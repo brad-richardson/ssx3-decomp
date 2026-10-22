@@ -131,6 +131,44 @@ together with the keyboard.
 
 Saves go to `saves/ssx3-mc0.ps2`.
 
+### Android
+
+The same window builds as an Android app (arm64, a `NativeActivity` with no Java code),
+packaged with [cargo-apk](https://crates.io/crates/cargo-apk). Tested with NDK
+28.2.13676358, SDK platform 34 and build-tools 34.0.0, built on macOS. Set up as in step 2
+first: the APK contains the translated game.
+
+```sh
+rustup target add aarch64-linux-android
+cargo install cargo-apk
+export ANDROID_HOME=/path/to/android-sdk
+export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358
+# The game profile is signed with your own key (keytool -genkeypair ...):
+export CARGO_APK_GAME_KEYSTORE=/path/to/your.keystore
+export CARGO_APK_GAME_KEYSTORE_PASSWORD=...
+cargo apk build -p ssx3 --lib --profile game    # -> target/game/apk/ssx3.apk
+```
+
+`apksigner` (in build-tools) needs a Java runtime. The app keeps its files in its external
+files folder: the disc image, `saves/` (memory card, `ssx3-settings.cfg`), `textures/` and
+screenshots. Install the APK and copy the image there:
+
+```sh
+adb install target/game/apk/ssx3.apk
+adb push "SSX 3 (USA).iso" "/sdcard/Android/data/com.example.ssx3/files/SSX 3 (USA).iso"
+```
+
+**Controls.** A game controller (USB or Bluetooth), buttons by position as above, both
+analog sticks and the analog triggers included. A keyboard has the keys above. The
+controller's home button or Back opens the settings overlay. There are no touch controls.
+
+**Known limits.**
+- winit reports 60 Hz for every Android display, so interpolation stays off on a 120 Hz
+  screen: choose the display rate in the settings overlay (`SSX3_FPS`).
+- Switching away from the app is not handled yet: the window is not recreated when
+  Android brings the app back.
+- The console output (stderr) is not visible on the device.
+
 ## Options
 
 Most options can be changed in the game with the settings overlay (F10): display rate,
@@ -279,7 +317,7 @@ boundaries) is committed. To explore the binary yourself, see
 | `ssx3-mc` | The memory card natively: the PS2 card filesystem (FAT, directories, ECC) on the raw `.ps2` image, answering libmc the way MCMAN/MCSERV do (saves are byte-identical to theirs). |
 | `ssx3-render` | The typed frame (captured draws, the frame build) and the VU1 rendering programs as readable Rust. |
 | `ssx3-snd` | The native sound driver (EA's IOP SNDDRV in Rust). |
-| `ssx3` | Front ends: the windowed `ssx3` (winit + wgpu + gilrs + cpal) and `ssx3-headless`. |
+| `ssx3` | Front ends: the windowed `ssx3` (winit + wgpu + gilrs + cpal; on Android the library `libssx3.so`) and `ssx3-headless`. |
 
 The game's guest threads run as coroutines (one stack each, `corosensei`) on the
 one host thread that drives frames; a thread switch is a stack switch

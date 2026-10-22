@@ -13,6 +13,15 @@ path = "src/main.rs"
 name = "ssx3-headless"
 path = "src/bin/ssx3_headless.rs"
 
+# Android: the window as the library NativeActivity loads (libssx3.so);
+# natively an empty library.
+[lib]
+name = "ssx3"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
 [features]
 default = ["ee-threads"]
 # Dynamic call graph of the EE code (SSX3_CALLPROF=<out>:<from>:<to>).
@@ -30,7 +39,6 @@ vu1-microcode = ["ssx3-ps2/vu1-microcode", "emu-gs"]
 [dependencies]
 env_logger = "0.11.11"
 font8x8 = "0.3.1"
-gilrs = "0.11"
 log = "0.4.34"
 pollster = "1.0.1"
 ssx3-core.workspace = true
@@ -45,3 +53,35 @@ ssx3-iop = { path = "../ssx3-iop" }
 ssx3-iop-gen = { path = "../../generated/iop/modules" }
 wgpu = "30.0.1"
 winit = "0.30.13"
+
+# gilrs has no Android backend: there the window reads controllers from the
+# activity's input queue (src/android.rs).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+gilrs = "0.11"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The NativeActivity glue: android_main, the input queue, the app's files dir.
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+
+# The APK (cargo-apk; README "Android"). The release profiles are signed with
+# the keystore in CARGO_APK_<PROFILE>_KEYSTORE / _KEYSTORE_PASSWORD.
+[package.metadata.android]
+# Placeholder application id: choose the project's own before publishing.
+package = "com.example.ssx3"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+# Vulkan (wgpu's backend) arrived in API 24; sound (oboe) falls back to
+# OpenSL ES below 26.
+min_sdk_version = 24
+target_sdk_version = 34
+
+[package.metadata.android.application]
+label = "SSX 3"
+theme = "@android:style/Theme.NoTitleBar.Fullscreen"
+
+[package.metadata.android.application.activity]
+orientation = "landscape"
+# A controller connecting (keyboard, navigation) or the display changing
+# must not restart the activity: the game would boot again.
+config_changes = "orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"

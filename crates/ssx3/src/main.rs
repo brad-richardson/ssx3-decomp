@@ -14,6 +14,8 @@ extern crate ssx3_ee_unwind as ssx3_ee;
 #[cfg(all(feature = "ee-threads", not(feature = "ee-unwind")))]
 extern crate ssx3_ee_threads as ssx3_ee;
 
+#[cfg(any(target_os = "android", test))]
+mod android;
 mod app;
 mod game;
 mod png;

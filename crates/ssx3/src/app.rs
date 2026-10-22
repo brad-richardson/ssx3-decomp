@@ -1,4 +1,6 @@
 //! The window: the game, its display and input, and the settings overlay.
+//! Shared by the desktop executable (`main.rs`) and the Android library
+//! (`lib.rs`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +27,12 @@ struct App {
     fps_mark: Instant,
     /// Pad 1 buttons held on the keyboard / on a game controller (libpad bits).
     keys: u16,
+    #[cfg(not(target_os = "android"))]
     gilrs: Option<gilrs::Gilrs>,
+    /// Android: controllers and keyboards, read from the activity's input
+    /// queue (`new_events`).
+    #[cfg(target_os = "android")]
+    pads: crate::android::Pads,
     /// Ticket of the previous frame's display request (MTGS): the window
     /// shows frame N-1 (or newer) while the GS thread finishes frame N.
     pending_display: Option<u64>,
@@ -53,6 +60,7 @@ struct App {
 const FIELD: Duration = Duration::from_micros(16_683);
 
 /// libpad button bit for a controller button.
+#[cfg(not(target_os = "android"))]
 fn gamepad_bit(b: gilrs::Button) -> Option<u16> {
     use gilrs::Button::*;
     Some(match b {
@@ -82,7 +90,14 @@ impl App {
     /// (plugged in with `SSX3_PAD2=1`).
     fn update_pad(&mut self) {
         let mut state = [(self.keys, [0x80u8; 4]), (0u16, [0x80u8; 4])];
+        #[cfg(target_os = "android")]
+        for (port, (buttons, sticks)) in state.iter_mut().enumerate() {
+            *buttons |= self.pads.buttons(port);
+            *sticks = self.pads.sticks(port);
+        }
+        #[cfg(not(target_os = "android"))]
         let mut open_menu = false;
+        #[cfg(not(target_os = "android"))]
         if let Some(g) = self.gilrs.as_mut() {
             while let Some(ev) = g.next_event() {
                 match ev.event {
@@ -137,6 +152,7 @@ impl App {
                 ];
             }
         }
+        #[cfg(not(target_os = "android"))]
         if open_menu && self.menu.is_none() {
             self.toggle_menu();
         }
@@ -257,6 +273,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 // The settings overlay pauses the game.
                 if self.menu.is_some() {
+                    #[cfg(not(target_os = "android"))]
                     self.poll_menu_pad();
                     self.next_tick = Instant::now();
                     if self.preview > 0 {
@@ -292,6 +309,20 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
+        }
+    }
+
+    /// Android: read the input queue first, before winit does (it passes on
+    /// only the X/Y axes of a controller, as touches; see `android.rs`).
+    #[cfg(target_os = "android")]
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        use winit::platform::android::ActiveEventLoopExtAndroid;
+        for key in self.pads.read_input(event_loop.android_app(), self.menu.is_some()) {
+            match (self.menu, crate::android::menu_key(key)) {
+                (Some(_), Some(k)) => self.menu_input(k),
+                (None, _) if crate::android::opens_menu(key) => self.toggle_menu(),
+                _ => {}
+            }
         }
     }
 }
@@ -484,6 +515,7 @@ impl App {
     }
 
     /// Controller navigation while the overlay is open.
+    #[cfg(not(target_os = "android"))]
     fn poll_menu_pad(&mut self) {
         let mut keys = Vec::new();
         if let Some(g) = self.gilrs.as_mut() {
@@ -507,8 +539,8 @@ impl App {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MenuKey {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuKey {
     Up,
     Down,
     Left,
@@ -564,6 +596,9 @@ pub fn run(mut event_loop: EventLoopBuilder<()>) {
         menu: None,
         restart_pending: false,
         preview: 0,
+        #[cfg(target_os = "android")]
+        pads: crate::android::Pads::new(),
+        #[cfg(not(target_os = "android"))]
         gilrs: gilrs::Gilrs::new()
             .map(|g| {
                 let pads: Vec<String> = g.gamepads().map(|(_, p)| p.name().to_string()).collect();
