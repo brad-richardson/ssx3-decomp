@@ -1177,7 +1177,7 @@ struct Region {
 /// always decode; `SSX3_CHAIN_CACHE_CHECK=1`: decode too and compare).
 #[derive(Default)]
 pub struct ChainCache {
-    map: HashMap<(u32, VifRegs), CachedChain>,
+    map: rustc_hash::FxHashMap<(u32, VifRegs), CachedChain>,
     /// (Hits, misses) so far.
     pub stats: (u64, u64),
     next_id: u64,
@@ -1254,39 +1254,64 @@ pub fn keep_payloads(on: bool) {
     KEEP_PAYLOADS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// What the chain cache has for a CALL into a chain ([`lookup`]).
+enum Lookup<'c> {
+    /// The cached recording still holds.
+    Hit(&'c crate::vif::Recording),
+    /// Not cached, or changed: the chain's hash and ranges, to record it.
+    Record(u64, Vec<(u32, u32)>),
+    /// The chain does not return plainly: walked as usual, not cached.
+    Walk,
+}
+
+/// The chain at `a` (under `key`) in the cache, with one map lookup. A
+/// recording holds while its memory is unchanged since it was last seen, or
+/// else while its hash is equal.
+fn lookup<'c>(
+    map: &'c mut rustc_hash::FxHashMap<(u32, VifRegs), CachedChain>,
+    m: &dyn Mem,
+    key: (u32, VifRegs),
+    snap: u64,
+    a: u32,
+) -> Lookup<'c> {
+    let to_record = |hashed: Option<(u64, Vec<(u32, u32)>)>| {
+        hashed.map_or(Lookup::Walk, |(hash, ranges)| Lookup::Record(hash, ranges))
+    };
+    let Some(e) = map.get_mut(&key) else {
+        return to_record(sub_chain_hash(m, a));
+    };
+    if snap != 0 && e.seen != 0 && e.ranges.iter().all(|&(s, t)| m.unchanged(s, t, e.seen)) {
+        return Lookup::Hit(&e.rec);
+    }
+    match sub_chain_hash(m, a) {
+        Some((hash, ranges)) if hash == e.hash => {
+            e.ranges = ranges;
+            e.seen = snap;
+            Lookup::Hit(&e.rec)
+        }
+        hashed => to_record(hashed),
+    }
+}
+
 /// A captured packet's CALL into the chain at `a`: replayed from the cache
-/// when it is unchanged, else decoded (and recorded when it can be), as a
-/// CALL from a payload is.
-fn play_chain(m: &dyn Mem, vif: &mut Vif1, cache: &mut ChainCache, a: u32) {
+/// when it is unchanged, else decoded (and recorded when it can be and
+/// `record` is set: `SSX3_CHAIN_CACHE`, on unless `0`), as a CALL from a
+/// payload is.
+fn play_chain(m: &dyn Mem, vif: &mut Vif1, cache: &mut ChainCache, a: u32, record: bool) {
     let key = (a, vif.regs);
     let snap = m.snapshot();
-    let unchanged = snap != 0
-        && cache.map.get(&key).is_some_and(|e| {
-            e.seen != 0 && e.ranges.iter().all(|&(s, t)| m.unchanged(s, t, e.seen))
-        });
-    let hashed = if unchanged {
-        None
-    } else {
-        sub_chain_hash(m, a)
-    };
-    let hit = match (&hashed, cache.map.get_mut(&key)) {
-        (None, Some(_)) => unchanged,
-        (Some((h, ranges)), Some(e)) if e.hash == *h => {
-            e.ranges = ranges.clone();
-            e.seen = snap;
-            true
+    let hashed = match lookup(&mut cache.map, m, key, snap, a) {
+        Lookup::Hit(rec) => {
+            cache.stats.0 += 1;
+            vif.replay(rec);
+            return;
         }
-        _ => false,
+        Lookup::Record(hash, ranges) => Some((hash, ranges)),
+        Lookup::Walk => None,
     };
-    if hit {
-        cache.stats.0 += 1;
-        let rec = &cache.map[&key].rec;
-        vif.replay(rec);
-        return;
-    }
     let mut asr = [0u32; 2];
     match hashed {
-        Some((hash, ranges)) if chain_cache_mode().0 && vif.idle() => {
+        Some((hash, ranges)) if record && vif.idle() => {
             cache.stats.1 += 1;
             if cache.map.len() > 8192 {
                 cache.map.clear();
@@ -1554,7 +1579,7 @@ pub fn build_cached(
                     {
                         w.vif.native(run);
                         if let Some(&crate::direct::Step::Chain(a)) = run.last() {
-                            play_chain(w.m, &mut w.vif, cache, a);
+                            play_chain(w.m, &mut w.vif, cache, a, chain_cache_mode().0);
                         }
                     }
                     // (Everything from it is native, chains included.)
@@ -1664,60 +1689,36 @@ pub fn build_cached(
             {
                 let key = (a, w.vif.regs);
                 let snap = w.m.snapshot();
-                // Unchanged since it was last seen: no hash needed.
-                let unchanged = snap != 0
-                    && cache.map.get(&key).is_some_and(|e| {
-                        e.seen != 0 && e.ranges.iter().all(|&(s, t)| w.m.unchanged(s, t, e.seen))
-                    });
-                let looked = if unchanged {
-                    Some(None)
-                } else {
-                    sub_chain_hash(w.m, a).map(Some)
-                };
-                if let Some(hashed) = looked {
-                    let hit = match (&hashed, cache.map.get_mut(&key)) {
-                        (None, Some(_)) => true,
-                        (Some((h, ranges)), Some(e)) if e.hash == *h => {
-                            e.ranges = ranges.clone();
-                            e.seen = snap;
-                            true
-                        }
-                        _ => false,
-                    };
-                    match cache.map.get(&key).filter(|_| hit).map(|e| &e.rec) {
-                        Some(rec) => {
-                            cache.stats.0 += 1;
-                            if check {
-                                let mut v = w.vif.clone_state();
-                                let mut asr2 = [0u32; 2];
-                                crate::chain::walk(w.m, a, false, false, 0, &mut asr2, &mut |d| {
-                                    v.write(d)
-                                });
-                                let mut r = w.vif.clone_state();
-                                r.replay(rec);
-                                if v.events != r.events
-                                    || v.regs != r.regs
-                                    || v.mem[..] != r.mem[..]
-                                {
-                                    issues.push(format!("chain cache: {a:#x} replays differently"));
-                                }
+                match lookup(&mut cache.map, w.m, key, snap, a) {
+                    Lookup::Hit(rec) => {
+                        cache.stats.0 += 1;
+                        if check {
+                            let mut v = w.vif.clone_state();
+                            let mut asr2 = [0u32; 2];
+                            crate::chain::walk(w.m, a, false, false, 0, &mut asr2, &mut |d| {
+                                v.write(d)
+                            });
+                            let mut r = w.vif.clone_state();
+                            r.replay(rec);
+                            if v.events != r.events || v.regs != r.regs || v.mem[..] != r.mem[..] {
+                                issues.push(format!("chain cache: {a:#x} replays differently"));
                             }
-                            w.vif.replay(rec);
-                            w.take_events();
-                            // Back after the CALL, as its RET would.
-                            tadr = tadr + 16 + qwc * 16;
-                            continue;
                         }
-                        None => {
-                            cache.stats.1 += 1;
-                            if cache.map.len() > 8192 {
-                                cache.map.clear();
-                            }
-                            w.vif.record();
-                            let (h, ranges) = hashed.expect("hashed on a miss");
-                            recording = Some((key, h, ranges, snap, asp));
-                        }
+                        w.vif.replay(rec);
+                        w.take_events();
+                        // Back after the CALL, as its RET would.
+                        tadr = tadr + 16 + qwc * 16;
+                        continue;
                     }
+                    Lookup::Record(h, ranges) => {
+                        cache.stats.1 += 1;
+                        if cache.map.len() > 8192 {
+                            cache.map.clear();
+                        }
+                        w.vif.record();
+                        recording = Some((key, h, ranges, snap, asp));
+                    }
+                    Lookup::Walk => {}
                 }
             }
             // Other top-level CALLs (material setup: .vutext program chains,
@@ -2045,6 +2046,91 @@ pub fn build_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EE memory for [`play_chain`]: qwords, a snapshot id, and what
+    /// `unchanged` answers.
+    struct Ram {
+        q: Vec<u128>,
+        snap: u64,
+        same: bool,
+    }
+    impl Mem for Ram {
+        fn qword(&self, a: u32) -> u128 {
+            self.q[(a / 16) as usize]
+        }
+        fn snapshot(&self) -> u64 {
+            self.snap
+        }
+        fn unchanged(&self, _a: u32, _b: u32, _since: u64) -> bool {
+            self.same
+        }
+    }
+
+    /// A chain miss records; a repeat replays with what decoding gives
+    /// (hashed, then trusted by snapshot); changed bytes miss and decode the
+    /// new input.
+    #[test]
+    fn play_chain_hits_replay_and_changes_miss() {
+        let q = |w: [u32; 4]| {
+            w[0] as u128 | (w[1] as u128) << 32 | (w[2] as u128) << 64 | (w[3] as u128) << 96
+        };
+        let mut ram = Ram {
+            q: vec![0; 64],
+            snap: 0,
+            same: false,
+        };
+        // At 0x100: CNT 3 {STCYCL 1,1; OFFSET 0x20; UNPACK V4-32 2 at
+        // TOPS; MSCAL 0x40}, then RET.
+        ram.q[0x10] = 0x1000_0000 | 3;
+        ram.q[0x11] = q([0x0100_0101, 0x0200_0020, 0x6c02_8000, 1]);
+        ram.q[0x12] = q([2, 3, 4, 5]);
+        ram.q[0x13] = q([6, 7, 8, 0x1400_0040]);
+        ram.q[0x14] = 0x6000_0000;
+        let regs = VifRegs {
+            base: 0x10,
+            ofst: 0x20,
+            ..Default::default()
+        };
+        let decode = |m: &Ram| {
+            let mut v = Vif1::new(regs);
+            let mut asr = [0u32; 2];
+            crate::chain::walk(m, 0x100, false, false, 0, &mut asr, &mut |d| v.write(d));
+            v
+        };
+        let mut cache = ChainCache::default();
+        let play = |m: &Ram, cache: &mut ChainCache| {
+            let mut v = Vif1::new(regs);
+            play_chain(m, &mut v, cache, 0x100, true);
+            v
+        };
+        let same =
+            |a: &Vif1, b: &Vif1| a.events == b.events && a.regs == b.regs && a.mem[..] == b.mem[..];
+        let first = decode(&ram);
+        // Miss: recorded.
+        assert!(same(&play(&ram, &mut cache), &first));
+        assert_eq!(cache.stats, (0, 1));
+        // Hit by hash (no snapshot yet), then by snapshot.
+        ram.snap = 5;
+        let v = play(&ram, &mut cache);
+        assert!(same(&v, &first));
+        // A replayed call carries its recording's id (`src`), which keys
+        // its data in the mesh arena.
+        assert!(matches!(&v.events[0], Event::Call(c) if c.src.is_some()));
+        assert_eq!(cache.stats, (1, 1));
+        ram.same = true;
+        assert!(same(&play(&ram, &mut cache), &first));
+        assert_eq!(cache.stats, (2, 1));
+        // Changed data: the hash differs, a miss decodes the new input.
+        ram.same = false;
+        ram.snap = 6;
+        ram.q[0x12] = q([2, 3, 4, 9]);
+        let changed = decode(&ram);
+        assert!(!same(&changed, &first));
+        assert!(same(&play(&ram, &mut cache), &changed));
+        assert_eq!(cache.stats, (2, 2));
+        assert!(same(&play(&ram, &mut cache), &changed));
+        assert_eq!(cache.stats, (3, 2));
+    }
 
     #[test]
     fn default_state_decodes() {

@@ -380,14 +380,16 @@ impl Native<'_> {
     /// A captured packet at `t` applied (as the walker does); its end.
     fn packet(&mut self, t: u32, owner: Owner, cache: &mut ChainCache) -> Option<u32> {
         let &k = self.at.get(&t)?;
-        let r = &self.direct[k];
+        // Copy the slice reference, so that `steps` does not borrow `self`,
+        // which the loop below needs mutably.
+        let direct = self.direct;
+        let r = &direct[k];
         match &r.cmd {
             Cmd::Vu(steps) => {
-                let steps = steps.clone();
                 for run in steps.split_inclusive(|s| matches!(s, crate::direct::Step::Chain(_))) {
                     self.vif.native(run);
                     if let Some(&crate::direct::Step::Chain(a)) = run.last() {
-                        play_chain(self.m, &mut self.vif, cache, a);
+                        play_chain(self.m, &mut self.vif, cache, a, chain_cache_mode().0);
                     }
                 }
                 let n = self.vif.events.len();

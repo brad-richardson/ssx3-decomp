@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The chain cache's map hasher (keys are VIF state; bucket order is never
+# observed). 1.x is the version naga and wgpu already pull in.
+rustc-hash = "1"
 # PS2 float semantics (FMAC/FTOI/DIV/CLIP) shared with the translated
 # microcode, for the bit-exact native VU1 programs (mat3.rs). The translated
 # microcode itself is not needed here.
