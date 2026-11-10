@@ -52,10 +52,11 @@
 //! would run pass 2 "flag 0"; anything else is not implemented.
 
 use crate::bezier::{
-    add, bc, emit_strip, gpu, msub, mul, project_xy, rewrite_st, sub, xform, ClipFlags, Mem,
-    Raster, Rgba, Vertex, COLOUR, EOP, FAN_TAG_A, FAN_TAG_B, FAN_TAG_CTX1, FAN_TAG_CTX2,
-    FAN_TOGGLE, LAST_TOP, PACKET_A, PACKET_B, RETURN_SAVE, STRIP_TAG_CTX1, STRIP_TAG_CTX2, V,
+    add, bc, emit_strip, gpu, msub, mul, project_xy, rewrite_st, sub, ClipFlags, Mem, Raster, Rgba,
+    Vertex, COLOUR, EOP, FAN_TAG_A, FAN_TAG_B, FAN_TAG_CTX1, FAN_TAG_CTX2, FAN_TOGGLE, LAST_TOP,
+    PACKET_A, PACKET_B, RETURN_SAVE, STRIP_TAG_CTX1, STRIP_TAG_CTX2, V,
 };
+use ssx3_vu::vu::fast::Columns;
 use ssx3_vu::vu::float;
 
 /// Hash of the program this module implements.
@@ -426,16 +427,18 @@ fn edge_params(e: &Edge, l: u16) -> impl Iterator<Item = (u16, u16)> {
     (0..l - 1).map(move |k| (u0 + du * k, v0 + dv * k))
 }
 
-fn coefficients(m: &Mem, patch: u16) -> [V; 16] {
-    std::array::from_fn(|i| m.ld(patch.wrapping_add(COEFFS + i as u16)))
+fn coefficients(m: &Mem, patch: u16) -> [Columns<4>; 4] {
+    std::array::from_fn(|j| {
+        let row = std::array::from_fn(|i| m.ld(patch.wrapping_add(COEFFS + (4 * j + i) as u16)));
+        Columns::new(&row)
+    })
 }
 
 /// The bicubic at basis rows `u`, `v`: `R_j = C[4j..4j+4]·u`, `P = R·v`
 /// (0x2338).
-fn bezier(c: &[V; 16], u: V, v: V) -> V {
-    let r: [V; 4] =
-        std::array::from_fn(|j| xform(&[c[4 * j], c[4 * j + 1], c[4 * j + 2], c[4 * j + 3]], u));
-    xform(&r, v)
+fn bezier(c: &[Columns<4>; 4], u: V, v: V) -> V {
+    let r: [V; 4] = std::array::from_fn(|j| c[j].xform(&u));
+    Columns::from_fmac(r).xform(&v)
 }
 
 /// 0x25b8: the edge UVs from the corner UVs (row 0 col 0, row 7 col 0,

@@ -157,13 +157,16 @@ pub fn sub(a: V, b: V) -> V {
 pub fn mul(a: V, b: V) -> V {
     fast::mul4::<0b1111, true, true>(&a, &b).0
 }
-/// `acc + a * b`.
+/// `acc + a * b`; `acc` is an accumulator value, always an FMAC result
+/// (`fast`, known-normal operands).
 pub fn madd(acc: V, a: V, b: V) -> V {
-    fast::madd4::<0b1111, true, true, true>(&acc, &a, &b).0
+    debug_assert!(fast::is_normal4(&acc));
+    fast::madd4::<0b1111, false, true, true>(&acc, &a, &b).0
 }
 /// `acc - a * b`.
 pub fn msub(acc: V, a: V, b: V) -> V {
-    fast::msub4::<0b1111, true, true, true>(&acc, &a, &b).0
+    debug_assert!(fast::is_normal4(&acc));
+    fast::msub4::<0b1111, false, true, true>(&acc, &a, &b).0
 }
 pub fn ftoi0(a: V) -> V {
     fast::ftoi4::<0>(&a)
@@ -184,14 +187,6 @@ pub fn merge(dst: V, src: V, mask: u8) -> V {
 /// DIV: `a / b` as the DIV unit computes it.
 pub fn div(a: u32, b: u32) -> u32 {
     float::div(a, b).value
-}
-
-/// `M·p` as MULAx / MADDAy / MADDAz / MADDw (columns `m[0..4]`).
-pub fn xform(m: &[V; 4], p: V) -> V {
-    let acc = mul(m[0], bc(p[0]));
-    let acc = madd(acc, m[1], bc(p[1]));
-    let acc = madd(acc, m[2], bc(p[2]));
-    madd(acc, m[3], bc(p[3]))
 }
 
 /// The CLIP flag register: the judgement bits of the last 4 CLIPs, newest
@@ -290,9 +285,10 @@ pub fn emit_strip(
     mark: &dyn Fn(usize) -> Option<u16>,
     kick: &mut dyn FnMut(&[u128]),
 ) {
+    let mat = fast::Columns::new(&r.mat);
     let mut cs: Vec<V> = Vec::with_capacity(verts.len());
     for (i, v) in verts.iter().enumerate() {
-        let c = xform(&r.mat, m.ld(v.pos));
+        let c = mat.xform(&m.ld(v.pos));
         let q = div(ONE, c[3]);
         let stq = mul(m.ld(v.uv), bc(q));
         clip.clip(c);
@@ -373,8 +369,9 @@ pub fn take_projector() -> Option<[f32; 3]> {
 
 pub fn project_xy(m: &mut Mem, mat: &[V; 4], src: u16, dst: u16, count: u16) {
     let zw = [0, 0, ONE, ONE];
+    let mat = fast::Columns::new(mat);
     for i in 0..count {
-        let p = xform(mat, m.ld(src.wrapping_add(i)));
+        let p = mat.xform(&m.ld(src.wrapping_add(i)));
         m.st(dst.wrapping_add(i), merge(zw, p, 0b1100));
     }
 }

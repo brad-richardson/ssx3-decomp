@@ -55,8 +55,8 @@
 
 use crate::bezier::Mem;
 use crate::mat4::{
-    add, bc, div, ftoi0, ftoi4, madd, max, min, mul, mul1, neg, sub, sub1, with_xyz, xform, Lfsr,
-    Packets, ONE, V,
+    add, bc, div, ftoi0, ftoi4, madd, max, min, mul, mul1, neg, sub, sub1, with_xyz, Lfsr, Packets,
+    ONE, V,
 };
 
 /// Hash of the program this module implements.
@@ -124,9 +124,10 @@ pub fn run(
     let depth_scale = add(bc(0), bc(depth_scale))[0];
     let far = mul1(ONE, FADE_FAR);
 
+    let columns = ssx3_vu::vu::fast::Columns::new(&mat);
     let mut out = Packets::new(PACKET_A, PACKET_B);
     flakes(seeds, offset, box_min, box_max, count, &mut |p, e, last| {
-        let c = xform(&mat, [p[0], p[1], p[2], ONE]);
+        let c = columns.xform(&[p[0], p[1], p[2], ONE]);
         let visible = fade || ssx3_vu::vu::fast::clip(c, c[3]) & 0x3f == 0;
         if visible {
             let rgba = if fade {

@@ -22,7 +22,7 @@ pub struct R {
 }
 
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn k(x: u32) -> uint32x4_t {
+pub(super) fn k(x: u32) -> uint32x4_t {
     unsafe { vdupq_n_u32(x) }
 }
 
@@ -40,7 +40,7 @@ pub fn store(v: uint32x4_t) -> [u32; 4] {
 
 /// Denormal -> ±0, exponent 255 -> ±max (`float::norm_in`).
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn norm(x: uint32x4_t) -> uint32x4_t {
+pub fn norm(x: uint32x4_t) -> uint32x4_t {
     unsafe {
         let e = vandq_u32(vshrq_n_u32::<23>(x), k(0xff));
         let s = vandq_u32(x, k(SIGN));
@@ -50,9 +50,9 @@ fn norm(x: uint32x4_t) -> uint32x4_t {
     }
 }
 
-/// `norm` when `N`; the translator passes `N = false` for operands it knows
-/// are already normalised (FMAC and ITOF results), where `norm` is the
-/// identity.
+/// `norm` when `N`; callers pass `N = false` for operands known to be in
+/// normal form already (FMAC and ITOF results; `fast`, "Known-normal
+/// operands"), where `norm` is the identity.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn opnd<const N: bool>(x: uint32x4_t) -> uint32x4_t {
     if N {

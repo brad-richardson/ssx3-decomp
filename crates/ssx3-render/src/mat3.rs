@@ -205,13 +205,16 @@ fn sub(a: V, b: V) -> V {
 fn mul(a: V, b: V) -> V {
     fast::mul4::<0b1111, true, true>(&a, &b).0
 }
-/// `acc + a * b`.
+/// `acc + a * b`; `acc` is an accumulator value, always an FMAC result
+/// (`fast`, known-normal operands).
 fn madd(acc: V, a: V, b: V) -> V {
-    fast::madd4::<0b1111, true, true, true>(&acc, &a, &b).0
+    debug_assert!(fast::is_normal4(&acc));
+    fast::madd4::<0b1111, false, true, true>(&acc, &a, &b).0
 }
 /// `acc - a * b`.
 fn msub(acc: V, a: V, b: V) -> V {
-    fast::msub4::<0b1111, true, true, true>(&acc, &a, &b).0
+    debug_assert!(fast::is_normal4(&acc));
+    fast::msub4::<0b1111, false, true, true>(&acc, &a, &b).0
 }
 fn max(a: V, b: V) -> V {
     fast::max4(&a, &b)
@@ -251,10 +254,7 @@ fn div(a: u32, b: u32) -> u32 {
 
 /// `M·p` as MULAx / MADDAy / MADDAz / MADDw (columns `m[0..4]`).
 fn xform_xyzw(m: &[V; 4], p: V) -> V {
-    let acc = mul(m[0], bc(p[0]));
-    let acc = madd(acc, m[1], bc(p[1]));
-    let acc = madd(acc, m[2], bc(p[2]));
-    madd(acc, m[3], bc(p[3]))
+    fast::Columns::new(m).xform(&p)
 }
 
 /// The CLIP flag register: the judgement bits of the last 4 CLIPs, newest
@@ -328,19 +328,19 @@ fn float_strip(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
     if n3 < 9 || !n3.is_multiple_of(3) {
         return false;
     }
-    let mat = [
+    let mat = fast::Columns::new(&[
         m.ld(MATRIX),
         m.ld(MATRIX + 1),
         m.ld(MATRIX + 2),
         m.ld(MATRIX + 3),
-    ];
+    ]);
     let (gs, go) = guard(m);
     let out = top.wrapping_add(OUT);
     let end = top.wrapping_add(n3).wrapping_add(9);
 
     // Prologue: the first two vertices transformed x, y, z, w.
-    let mut cur = xform_xyzw(&mat, m.ld(top.wrapping_add(4))); // vf12
-    let mut next = xform_xyzw(&mat, m.ld(top.wrapping_add(7))); // vf13
+    let mut cur = mat.xform(&m.ld(top.wrapping_add(4))); // vf12
+    let mut next = mat.xform(&m.ld(top.wrapping_add(7))); // vf13
     let mut st = m.ld(top.wrapping_add(2)); // vf10: ST of the current vertex
     let mut col = m.ld(top.wrapping_add(3)); // vf8: RGBA of the current vertex
     let mut q = div(ONE, cur[3]);
@@ -351,7 +351,7 @@ fn float_strip(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
     let mut dst = out.wrapping_add(1); // vi6
     let mut k = 0u32;
     loop {
-        let p2 = m.ld(src.wrapping_add(1)); // position two vertices ahead
+        let p2 = fast::norm4(&m.ld(src.wrapping_add(1))); // position two vertices ahead
         let cq = mul(cur, bc(q));
         let stq = mul(st, bc(q));
         st = m.ld(src.wrapping_sub(4));
@@ -364,8 +364,8 @@ fn float_strip(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
         cur = next;
         m.st(dst.wrapping_sub(1), col);
         // The next-but-one vertex, transformed w, z, y, x (with w = 1).
-        let mut acc = mul(mat[3], bc(ONE));
-        acc = madd(acc, mat[2], bc(p2[2]));
+        let mut acc = fast::mul_normal(&mat[3], &bc(ONE));
+        acc = fast::madd_normal(&acc, &mat[2], &bc(p2[2]));
         let mut xyz = if k < 2 {
             let f = ftoi4(screen);
             [f[0], f[1], f[2], 0xffff_ffff]
@@ -386,9 +386,9 @@ fn float_strip(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
                 let ca = itof0(m.ld(dst.wrapping_sub(7)));
                 let cb = itof0(m.ld(dst.wrapping_sub(4)));
                 let cc = itof0(m.ld(dst.wrapping_sub(1)));
-                let a = xform_xyzw(&mat, pa);
-                let b = xform_xyzw(&mat, pb);
-                let c = xform_xyzw(&mat, pc);
+                let a = mat.xform(&pa);
+                let b = mat.xform(&pb);
+                let c = mat.xform(&pc);
                 for (i, v) in [a, sa, ca, b, sb, cb, c, sc, cc].into_iter().enumerate() {
                     m.st(CLIP_BUF_A + i as u16, v);
                 }
@@ -399,8 +399,8 @@ fn float_strip(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
             }
         }
         col = m.ld(src.wrapping_sub(6));
-        acc = madd(acc, mat[1], bc(p2[1]));
-        next = madd(acc, mat[0], bc(p2[0]));
+        acc = fast::madd_normal(&acc, &mat[1], &bc(p2[1]));
+        next = fast::madd_normal(&acc, &mat[0], &bc(p2[0]));
         m.st(dst, xyz);
         dst = dst.wrapping_add(1);
         q = q_next;
@@ -432,26 +432,26 @@ fn float_strip_clip(
 ) -> Vec<(V, bool)> {
     fanned.clear();
     fanned.resize(n as usize, false);
-    let mat = [
+    let mat = fast::Columns::new(&[
         m.ld(MATRIX),
         m.ld(MATRIX + 1),
         m.ld(MATRIX + 2),
         m.ld(MATRIX + 3),
-    ];
+    ]);
     let (gs, go) = guard(m);
-    let mut cur = xform_xyzw(&mat, m.ld(top.wrapping_add(4)));
-    let mut next = xform_xyzw(&mat, m.ld(top.wrapping_add(7)));
+    let mut cur = mat.xform(&m.ld(top.wrapping_add(4)));
+    let mut next = mat.xform(&m.ld(top.wrapping_add(7)));
     let mut clip = ClipFlags::default();
     let mut src = top.wrapping_add(9);
     let mut out = Vec::with_capacity(n as usize);
     for k in 0..n {
-        let p2 = m.ld(src.wrapping_add(1));
+        let p2 = fast::norm4(&m.ld(src.wrapping_add(1)));
         src = src.wrapping_add(3);
         clip.clip(cur);
         out.push((cur, true));
         cur = next;
-        let mut acc = mul(mat[3], bc(ONE));
-        acc = madd(acc, mat[2], bc(p2[2]));
+        let mut acc = fast::mul_normal(&mat[3], &bc(ONE));
+        acc = fast::madd_normal(&acc, &mat[2], &bc(p2[2]));
         if k >= 2 {
             let culled = clip.fcand(0x3_ffff);
             out[k as usize].1 = culled;
@@ -463,9 +463,9 @@ fn float_strip_clip(
                 let (pa, pb, pc) = (pos(14), pos(11), pos(8));
                 let (sa, sb, sc) = (pos(16), pos(13), pos(10));
                 let (ca, cb, cc) = (itof0(pos(15)), itof0(pos(12)), itof0(pos(9)));
-                let a = xform_xyzw(&mat, pa);
-                let b = xform_xyzw(&mat, pb);
-                let c = xform_xyzw(&mat, pc);
+                let a = mat.xform(&pa);
+                let b = mat.xform(&pb);
+                let c = mat.xform(&pc);
                 for (i, v) in [a, sa, ca, b, sb, cb, c, sc, cc].into_iter().enumerate() {
                     m.st(CLIP_BUF_A + i as u16, v);
                 }
@@ -475,8 +475,8 @@ fn float_strip_clip(
                 acc = mul(m.ld(ACC_SPILL), bc(ONE));
             }
         }
-        acc = madd(acc, mat[1], bc(p2[1]));
-        next = madd(acc, mat[0], bc(p2[0]));
+        acc = fast::madd_normal(&acc, &mat[1], &bc(p2[1]));
+        next = fast::madd_normal(&acc, &mat[0], &bc(p2[0]));
     }
     out
 }
@@ -1082,6 +1082,7 @@ fn light(m: &mut Mem, normals: u16, dst: u16, n: u16) {
 /// Per vertex {STQ, RGBA, XYZ2}; the first two of each strip get ADC.
 fn mesh_strips(m: &mut Mem, mesh: &Mesh, out: u16, mat: &[V; 4], gs: V, go: V, with_rgba: bool) {
     let screen: [V; 4] = std::array::from_fn(|i| madd(mul(gs, mat[i]), go, bc(mat[i][3])));
+    let screen = fast::Columns::from_fmac(screen);
     let (mut xyz, mut uv, mut col) = (mesh.xyz(), mesh.uv(), mesh.colour());
     let mut o = out;
     for s in 0..mesh.strips {
@@ -1089,15 +1090,7 @@ fn mesh_strips(m: &mut Mem, mesh: &Mesh, out: u16, mat: &[V; 4], gs: V, go: V, w
         let strip_out = o;
         for _ in 0..len {
             let p = itof15(m.ld(xyz));
-            let c = madd(
-                madd(
-                    madd(mul(screen[0], bc(p[0])), screen[1], bc(p[1])),
-                    screen[2],
-                    bc(p[2]),
-                ),
-                screen[3],
-                bc(ONE),
-            );
+            let c = screen.xform(&[p[0], p[1], p[2], ONE]);
             let q = div(ONE, c[3]);
             let t = itof12(m.ld(uv));
             m.st(o, mul([t[0], t[1], ONE, ONE], bc(q)));
@@ -1139,13 +1132,14 @@ fn mesh_strips_clipped(
         let r = m.ld(a);
         merge(r, itof12(r), 0b1100)
     };
+    let columns = fast::Columns::new(mat);
     let (mut xyz, mut uv, mut col) = (mesh.xyz(), mesh.uv(), mesh.colour());
     let mut o = out;
     let mut clip = ClipFlags::default();
     for s in 0..mesh.strips {
         let len = m.ilw(mesh.lengths().wrapping_add(s), 0);
         for k in 0..len {
-            let c = xform_xyzw(mat, pos(m, xyz.wrapping_add(k)));
+            let c = columns.xform(&pos(m, xyz.wrapping_add(k)));
             let q = div(ONE, c[3]);
             let stq = mul(tex(m, uv.wrapping_add(k)), bc(q));
             clip.clip(c);
@@ -1165,7 +1159,7 @@ fn mesh_strips_clipped(
                     let mut buf = [ZERO; 9];
                     for j in 0..3u16 {
                         let i = k - 2 + j;
-                        buf[3 * j as usize] = xform_xyzw(mat, pos(m, xyz.wrapping_add(i)));
+                        buf[3 * j as usize] = columns.xform(&pos(m, xyz.wrapping_add(i)));
                         buf[3 * j as usize + 1] = tex(m, uv.wrapping_add(i));
                         buf[3 * j as usize + 2] =
                             itof0(m.ld(o.wrapping_sub(3 * (2 - j)).wrapping_add(1)));
@@ -1207,11 +1201,12 @@ fn line_shape(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
         m.ld(MATRIX + 2),
         m.ld(MATRIX + 3),
     ];
+    let mat = fast::Columns::new(&mat);
     // Coefficients in clip space (x, y, z, w order, each with its own w).
-    let c0 = xform_xyzw(&mat, m.ld(top.wrapping_add(6)));
-    let c1 = xform_xyzw(&mat, m.ld(top.wrapping_add(5)));
-    let c2 = xform_xyzw(&mat, m.ld(top.wrapping_add(4)));
-    let c3 = xform_xyzw(&mat, m.ld(top.wrapping_add(3)));
+    let c0 = mat.xform(&m.ld(top.wrapping_add(6)));
+    let c1 = mat.xform(&m.ld(top.wrapping_add(5)));
+    let c2 = mat.xform(&m.ld(top.wrapping_add(4)));
+    let c3 = mat.xform(&m.ld(top.wrapping_add(3)));
     let dt = div(ONE, float::sub(itof0(bc(n_raw))[0], ONE).0);
     let (gs, go) = guard(m);
 
@@ -1840,6 +1835,95 @@ mod tests {
 
     fn f(x: f32) -> u32 {
         x.to_bits()
+    }
+
+    /// Both strip loops transform the next vertex through a hand-written
+    /// chain (`w, z, y, x`) with the point normalised once. A point lane
+    /// with exponent 255 must act as ±max, as it does when every op
+    /// normalises it, so check them against the scalar every-step chain.
+    #[test]
+    fn strip_loops_normalise_the_point() {
+        let top = 0x26u16;
+        let n = 5u16;
+        let one = f(1.0);
+        // A raw exponent-255 lane times 2^-118 is 1024.0, ±max times it is
+        // just under; small enough that the difference survives FTOI4.
+        let scale = 0x0480_0000;
+        let columns: [V; 4] = [
+            [scale, 0, 0, 0],
+            [0, scale, 0, 0],
+            [0, 0, one, 0],
+            [0, 0, 0, one],
+        ];
+        let points: [V; 5] = [
+            [f(1.0), f(2.0), f(3.0), one],
+            [f(-1.0), f(1.0), f(4.0), one],
+            [f(1.0), 0x7f80_0000, f(5.0), one],
+            [0xff80_0001, f(2.0), f(6.0), one],
+            [f(3.0), f(-3.0), 0x0000_0001, one],
+        ];
+        let (guard_scale, guard_offset): (V, V) = ([one, one, one, 0], [0, 0, 0, 0]);
+        let input = || {
+            let mut mem = Box::new([0u8; 16384]);
+            let mut m = Mem(&mut mem);
+            for (i, c) in columns.iter().enumerate() {
+                m.st(MATRIX + i as u16, *c);
+            }
+            m.st(GUARD_SCALE, guard_scale);
+            m.st(GUARD_OFFSET, guard_offset);
+            m.st(FAN_TOGGLE, [0, 0, 0, FAN_TAG_A as u32]);
+            let fan_tag = [0, 3 << 28, 0x412, 0];
+            m.st(FAN_TAG_A, fan_tag);
+            m.st(FAN_TAG_B, fan_tag);
+            m.st(top, [n as u32 | 0x8000, 3 << 28, 0x412, 0]);
+            m.st(top + 1, [3 * n as u32, 0, 0, 0]);
+            for (k, p) in points.iter().enumerate() {
+                let a = top + 2 + 3 * k as u16;
+                m.st(a, [f(0.5), f(0.5), one, 0]);
+                m.st(a + 1, [0x80, 0x40, 0x20, 0x80]);
+                m.st(a + 2, *p);
+            }
+            mem
+        };
+        // The first two vertices are x, y, z, w; the rest w = 1, then z, y, x.
+        let want: Vec<V> = (0..n as usize)
+            .map(|k| {
+                let p = points[k];
+                std::array::from_fn(|l| {
+                    let c = |i: usize| columns[i][l];
+                    if k < 2 {
+                        let acc = float::mul_ref(c(0), p[0]).0;
+                        let acc = float::madd(acc, c(1), p[1]).0;
+                        let acc = float::madd(acc, c(2), p[2]).0;
+                        float::madd(acc, c(3), p[3]).0
+                    } else {
+                        let acc = float::mul_ref(c(3), one).0;
+                        let acc = float::madd(acc, c(2), p[2]).0;
+                        let acc = float::madd(acc, c(1), p[1]).0;
+                        float::madd(acc, c(0), p[0]).0
+                    }
+                })
+            })
+            .collect();
+
+        let mut mem = input();
+        let mut fanned = Vec::new();
+        let got = float_strip_clip(&mut Mem(&mut mem), top, n, &mut |_| {}, &mut fanned);
+        let got: Vec<V> = got.into_iter().map(|(c, _)| c).collect();
+        assert_eq!(got, want);
+
+        let mut mem = input();
+        assert!(float_strip(&mut Mem(&mut mem), top, &mut |_| {}));
+        let m = Mem(&mut mem);
+        for (k, c) in want.iter().enumerate() {
+            let q = float::div(one, c[3]).value;
+            let xyz = m.ld(top + OUT + 3 + 3 * k as u16);
+            for l in 0..3 {
+                let acc = float::mul_ref(guard_offset[l], one).0;
+                let screen = float::madd(acc, float::mul_ref(c[l], q).0, guard_scale[l]).0;
+                assert_eq!(xyz[l], float::to_fixed(screen, 4), "vertex {k} lane {l}");
+            }
+        }
     }
 
     /// A hand-made 3-vertex float strip: identity matrix, one triangle.

@@ -15,8 +15,11 @@ pub fn mul(a: &V, b: &V) -> V {
     fast::mul4::<0b1111, true, true>(a, b).0
 }
 
+/// `acc + a * b`; `acc` is an accumulator value, in normal form (`fast`,
+/// known-normal operands).
 pub fn madd(acc: &V, a: &V, b: &V) -> V {
-    fast::madd4::<0b1111, true, true, true>(acc, a, b).0
+    debug_assert!(fast::is_normal4(acc));
+    fast::madd4::<0b1111, false, true, true>(acc, a, b).0
 }
 
 pub fn add(a: &V, b: &V) -> V {
@@ -35,10 +38,7 @@ pub fn bc(v: &V, l: usize) -> V {
 /// `v` through `m` (`vmulax / vmadday / vmaddaz / vmaddw`):
 /// `m0·v.x + m1·v.y + m2·v.z + m3·v.w`.
 pub fn xform(m: &M, v: &V) -> V {
-    let acc = mul(&m[0], &bc(v, 0));
-    let acc = madd(&acc, &m[1], &bc(v, 1));
-    let acc = madd(&acc, &m[2], &bc(v, 2));
-    madd(&acc, &m[3], &bc(v, 3))
+    fast::Columns::new(m).xform(v)
 }
 
 /// Each row of `b` through `a` (the row-vector product `b · a`).

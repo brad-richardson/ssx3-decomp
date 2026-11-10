@@ -235,6 +235,8 @@ impl Packets {
 /// The header, as the sprite code reads it.
 struct Screen {
     m: [V; 4],
+    /// `m`, for the CPU's transforms.
+    cols: fast::Columns<4>,
     scale: V,
     offset: V,
     proj: V,
@@ -242,8 +244,10 @@ struct Screen {
 
 impl Screen {
     fn load(m: &Mem) -> Screen {
+        let matrix = m.matrix(MATRIX);
         Screen {
-            m: m.matrix(MATRIX),
+            m: matrix,
+            cols: fast::Columns::new(&matrix),
             scale: m.ld(SCREEN_SCALE),
             offset: m.ld(SCREEN_OFFSET),
             proj: m.ld(PROJ),
@@ -376,7 +380,7 @@ fn emitter_particles(
     each: &mut dyn FnMut(&mut Mem, &Particle),
 ) {
     let d = |m: &Mem, i: u16| m.ld(top.wrapping_add(i));
-    let to_clip = |m: &Mem, i: u16| xform(&scr.m, d(m, i));
+    let to_clip = |m: &Mem, i: u16| scr.cols.xform(&d(m, i));
     // Directions and points in clip space (M·D, w included).
     let spawn_base = to_clip(m, 11);
     let spawn_rand = [to_clip(m, 12), to_clip(m, 13)];
@@ -451,7 +455,7 @@ fn emitter_particles(
 
 fn emitter(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) {
     let scr = Screen::load(m);
-    let trail = Trail::load(m, top, xform(&scr.m, m.ld(top.wrapping_add(6))), F64);
+    let trail = Trail::load(m, top, scr.cols.xform(&m.ld(top.wrapping_add(6))), F64);
     let mut out = Packets::new(PACKET_A, PACKET_B);
     emitter_particles(m, top, &scr, &mut |m, p| {
         let mut fade = ONE;
@@ -611,7 +615,7 @@ fn ring(m: &mut Mem, top: u16, kind: Ring, kick: &mut dyn FnMut(&[u128])) {
             let poly = drag_poly(tk);
             let g = add(g, p.spawn);
             let pp = madd(mul(g, bc(ONE)), p.g_minus_v, bc(poly));
-            let c = xform(&scr.m, [pp[0], pp[1], pp[2], ONE]);
+            let c = scr.cols.xform(&[pp[0], pp[1], pp[2], ONE]);
             let visible = fast::clip(c, c[3]) & 0x3f == 0;
             let a = mul1(p.alpha, fade);
             // Here every sample fades, drawn or not (delay slot of the cull
@@ -798,7 +802,7 @@ fn glitter_points(
     let (d0, d1, d2, d3) = (coef[0], coef[1], coef[2], coef[3]);
 
     // The patch normal direction: (D16 D17 D18 D18) · (M · (0,0,1,0)).
-    let mz = xform(&scr.m, [0, 0, ONE, 0]);
+    let mz = scr.cols.xform(&[0, 0, ONE, 0]);
     let normal = {
         let acc = mul(d(m, 16), bc(mz[0]));
         let acc = madd(acc, d(m, 17), bc(mz[1]));
@@ -928,7 +932,7 @@ fn glitter(m: &mut Mem, top: u16, kick: &mut dyn FnMut(&[u128])) -> bool {
     let mut out = Packets::new(PACKET_A, PACKET_B);
     glitter_points(m, top, &scr, &mut |m, pt| {
         let p = g.eval(pt);
-        let cl = xform(&scr.m, [p[0], p[1], p[2], ONE]);
+        let cl = scr.cols.xform(&[p[0], p[1], p[2], ONE]);
         if fast::clip(cl, cl[3]) & 0x3f == 0 {
             let q = div(ONE, cl[3]);
             let mut half = mul(g.half(&scr), bc(q));
@@ -1139,7 +1143,7 @@ pub fn plan_gpu(
         _ => return None,
     };
     let trail = match kind {
-        None => Trail::load(m, top, xform(&scr.m, d(m, 6)), F64),
+        None => Trail::load(m, top, scr.cols.xform(&d(m, 6)), F64),
         Some(k) => Trail::load(m, top, d(m, 6), k.half_max()),
     };
     let mut data = Vec::new();
@@ -1478,9 +1482,11 @@ pub(crate) fn sub(a: V, b: V) -> V {
 pub(crate) fn mul(a: V, b: V) -> V {
     fast::mul4::<0b1111, true, true>(&a, &b).0
 }
-/// `acc + a·b`.
+/// `acc + a * b`; `acc` is an accumulator value, always an FMAC result
+/// (`fast`, known-normal operands).
 pub(crate) fn madd(acc: V, a: V, b: V) -> V {
-    fast::madd4::<0b1111, true, true, true>(&acc, &a, &b).0
+    debug_assert!(fast::is_normal4(&acc));
+    fast::madd4::<0b1111, false, true, true>(&acc, &a, &b).0
 }
 pub(crate) fn max(a: V, b: V) -> V {
     fast::max4(&a, &b)
@@ -1527,13 +1533,6 @@ pub(crate) fn neg(x: u32) -> bool {
 /// `v` with x, y, z from `xyz` (a `.xyz` destination mask).
 pub(crate) fn with_xyz(v: V, xyz: V) -> V {
     [xyz[0], xyz[1], xyz[2], v[3]]
-}
-/// `cols · p` as MULAx / MADDAy / MADDAz / MADDw.
-pub(crate) fn xform(cols: &[V; 4], p: V) -> V {
-    let acc = mul(cols[0], bc(p[0]));
-    let acc = madd(acc, cols[1], bc(p[1]));
-    let acc = madd(acc, cols[2], bc(p[2]));
-    madd(acc, cols[3], bc(p[3]))
 }
 
 /// Differential tests against the translated microcode on synthetic inputs

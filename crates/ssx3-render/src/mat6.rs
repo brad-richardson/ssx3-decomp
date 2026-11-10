@@ -238,9 +238,11 @@ impl Mem<'_> {
 fn mul(a: V, b: V) -> V {
     fast::mul4::<0b1111, true, true>(&a, &b).0
 }
-/// `acc + a * b`.
+/// `acc + a * b`; `acc` is an accumulator value, always an FMAC result
+/// (`fast`, known-normal operands).
 fn madd(acc: V, a: V, b: V) -> V {
-    fast::madd4::<0b1111, true, true, true>(&acc, &a, &b).0
+    debug_assert!(fast::is_normal4(&acc));
+    fast::madd4::<0b1111, false, true, true>(&acc, &a, &b).0
 }
 fn max(a: V, b: V) -> V {
     fast::max4(&a, &b)
@@ -270,17 +272,12 @@ fn div(a: u32, b: u32) -> u32 {
 
 /// `cols · (p.x, p.y, p.z, w)` as MULAx / MADDAy / MADDAz / MADDw.
 fn xform(cols: &[V; 4], p: V, w: u32) -> V {
-    let acc = mul(cols[0], bc(p[0]));
-    let acc = madd(acc, cols[1], bc(p[1]));
-    let acc = madd(acc, cols[2], bc(p[2]));
-    madd(acc, cols[3], bc(w))
+    fast::Columns::new(cols).xform(&[p[0], p[1], p[2], w])
 }
 
 /// `cols · (v.x, v.y, v.z)` as MULAx / MADDAy / MADDz (3 columns).
 fn xform3(cols: &[V; 3], v: V) -> V {
-    let acc = mul(cols[0], bc(v[0]));
-    let acc = madd(acc, cols[1], bc(v[1]));
-    madd(acc, cols[2], bc(v[2]))
+    fast::Columns::new(cols).xform(&v)
 }
 
 // ---------------------------------------------------------------------------

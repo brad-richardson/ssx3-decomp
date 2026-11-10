@@ -54,6 +54,13 @@ fn lanes(d: u8) -> u32 {
     d | d << 4 | d << 8 | d << 12
 }
 
+/// The lanes of `v` in `d` are in normal form (`fast`, "Known-normal operands").
+fn lanes_normal(v: &V, d: u8) -> bool {
+    v.iter()
+        .enumerate()
+        .all(|(l, &x)| d & (8 >> l) == 0 || super::float::norm_in(x) == x)
+}
+
 fn merge(to: &mut V, d: u8, v: V) {
     for (l, x) in to.iter_mut().enumerate() {
         if d & (8 >> l) != 0 {
@@ -116,15 +123,19 @@ impl Vu0<'_> {
     fn mul(&mut self, to: To, d: u8, s: V, t: V) -> u32 {
         self.fmac(to, d, fast::mul4::<XYZW, true, true>(&s, &t))
     }
-    /// `to = ACC + s * t`.
+    /// `to = ACC + s * t`. No need to normalise ACC: each routine writes the
+    /// lanes in `d` with an FMAC op before reading them here, and the other
+    /// lanes' results and flags are discarded.
     fn madd(&mut self, to: To, d: u8, s: V, t: V) -> u32 {
         let a = self.acc;
-        self.fmac(to, d, fast::madd4::<XYZW, true, true, true>(&a, &s, &t))
+        debug_assert!(lanes_normal(&a, d));
+        self.fmac(to, d, fast::madd4::<XYZW, false, true, true>(&a, &s, &t))
     }
-    /// `to = ACC - s * t`.
+    /// `to = ACC - s * t`; ACC as in [`Vu0::madd`].
     fn msub(&mut self, to: To, d: u8, s: V, t: V) -> u32 {
         let a = self.acc;
-        self.fmac(to, d, fast::msub4::<XYZW, true, true, true>(&a, &s, &t))
+        debug_assert!(lanes_normal(&a, d));
+        self.fmac(to, d, fast::msub4::<XYZW, false, true, true>(&a, &s, &t))
     }
     /// `to.xyz = s × t` (OPMULA ACC = s.yzx * t.zxy; OPMSUB to = ACC - t.yzx * s.zxy).
     fn cross(&mut self, to: usize, s: usize, t: usize) {
@@ -740,11 +751,14 @@ fn mul(s: V, t: V) -> (V, u32) {
 fn add(s: V, t: V) -> (V, u32) {
     fast::add4::<XYZW, true, true>(&s, &t)
 }
+/// `a` is ACC; only the lanes a caller keeps need to be in normal form, as
+/// in [`Vu0::madd`].
 fn madd(a: V, s: V, t: V) -> (V, u32) {
-    fast::madd4::<XYZW, true, true, true>(&a, &s, &t)
+    fast::madd4::<XYZW, false, true, true>(&a, &s, &t)
 }
+/// `a` is ACC, as in [`madd`].
 fn msub(a: V, s: V, t: V) -> (V, u32) {
-    fast::msub4::<XYZW, true, true, true>(&a, &s, &t)
+    fast::msub4::<XYZW, false, true, true>(&a, &s, &t)
 }
 /// `to` with the lanes `d` of `v`.
 fn with(mut to: V, d: u8, v: V) -> V {

@@ -569,13 +569,11 @@ fn draw_trail_with(c: &mut Cpu, entry: u32, view_ret: u32) {
     ensure_view_matrices(c, gm, view_ret);
     use ssx3_vu::vu::fast;
     let rows: [[u32; 4]; 4] = std::array::from_fn(|i| v4(q(c, gm + 0x5860 + 16 * i as u32)));
+    let rows = fast::Columns::new(&rows);
     let mut data: Vec<u128> = (0..4u32)
         .map(|i| {
             let v = v4(q(c, d + 0x50 + 16 * i));
-            let acc = fast::mul4::<0b1111, true, true>(&rows[0], &[v[0]; 4]).0;
-            let acc = fast::madd4::<0b1111, true, true, true>(&acc, &rows[1], &[v[1]; 4]).0;
-            let acc = fast::madd4::<0b1111, true, true, true>(&acc, &rows[2], &[v[2]; 4]).0;
-            q4(fast::madd4::<0b1111, true, true, true>(&acc, &rows[3], &[v[3]; 4]).0)
+            q4(rows.xform(&v))
         })
         .collect();
     data.push(0);
