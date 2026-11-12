@@ -6,7 +6,7 @@
 //!   ring. [`Output::Device`] (the default): the default cpal device;
 //!   [`Output::Off`]: nothing (no ring); [`Output::Pull`]: the front end
 //!   takes the samples with [`pull`] and feeds its own device (the browser's
-//!   AudioWorklet, an Android Oboe stream, SDL, ...).
+//!   AudioWorklet, a cpal callback on mobile, SDL, ...).
 //! * `SSX3_AUDIO` overrides it: `0` off, `null` a silent device drained in
 //!   real time (tests), `pull` pull, anything else the device.
 //! * `SSX3_WAV=path.wav` records everything the SPU2 produces.
@@ -73,7 +73,8 @@ pub enum Output {
     Off,
     /// The front end pulls the samples ([`pull`]): interleaved stereo i16
     /// at [`RATE`], at most ~200 ms queued (newer samples are dropped while
-    /// the queue is full).
+    /// the queue is full). The queue counts from the start: the ring plus
+    /// what the front end reported holding ([`report_buffered`]).
     Pull,
 }
 
@@ -99,17 +100,16 @@ pub fn output() -> Output {
 static PULLED: Mutex<Option<Ring>> = Mutex::new(None);
 
 /// [`Output::Pull`]: stereo frames the front end holds beyond the ring
-/// ([`report_buffered`]); negative until it reports.
+/// ([`report_buffered`]); negative until it reports (reads as 0).
 static FRONT_BUFFERED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
 /// [`Output::Pull`]: how many stereo frames the front end has buffered but
-/// not played yet (its own queue, a device buffer it can see). Once
-/// reported, [`Sink::queued_frames`] counts the ring plus this, so the
-/// real-time mixer keeps the front end's stream fed when the game catches
-/// up; report again whenever it changes. Unreported, a front end that pulls
-/// once per presented image is not topped up (it may drain the ring every
-/// frame). [`pull_into`] reports 0 the first time it is called: a front end
-/// pulling from its audio callback holds nothing beyond the ring.
+/// not played yet (its own queue, a device buffer it can see).
+/// [`Sink::queued_frames`] counts the ring plus this, so the real-time
+/// mixer keeps the front end's stream fed when the game catches up; report
+/// again whenever it changes. [`pull_into`] reports 0 the first time it is
+/// called: a front end pulling from its audio callback holds nothing
+/// beyond the ring.
 pub fn report_buffered(frames: usize) {
     FRONT_BUFFERED.store(
         frames.min(i64::MAX as usize) as i64,
@@ -285,14 +285,18 @@ impl Sink {
         }
     }
 
-    /// Stereo frames waiting for the output device (`None` without one, and
-    /// when the front end pulls the samples without [`report_buffered`]: it
-    /// may drain them every frame; with it, the ring plus what it reported).
+    /// Stereo frames waiting for the output device (`None` without one or
+    /// while suspended; for a pulled sink, the ring plus what the front
+    /// end reported holding, from the start).
     pub fn queued_frames(&self) -> Option<usize> {
         if suspended() {
             return None;
         }
-        let front = if self.pulled { front_buffered()? } else { 0 };
+        let front = if self.pulled {
+            front_buffered().unwrap_or(0)
+        } else {
+            0
+        };
         self.ring
             .as_ref()
             .map(|r| r.lock().map_or(0, |q| q.len() / 2) + front)
@@ -482,7 +486,8 @@ mod tests {
         }
         set_output(Output::Pull);
         let mut sink = Sink::from_env();
-        assert_eq!(sink.queued_frames(), None);
+        // The queue counts from the start: an empty ring reads as 0.
+        assert_eq!(sink.queued_frames(), Some(0));
         sink.push(&[1, 2, 3, 4]);
         let mut out = Vec::new();
         assert_eq!(pull(&mut out), 2);
