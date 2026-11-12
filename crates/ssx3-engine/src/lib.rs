@@ -31,6 +31,7 @@ mod render;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use boot::{init_paths, repo_root};
 pub use debug::{dump, status};
@@ -107,6 +108,10 @@ pub struct EngineConfig {
     /// samples with [`Engine::audio_pull`] ([`Audio::Pull`]). The
     /// `SSX3_AUDIO` setting overrides it (`0`, `null`, `pull`, `1`).
     pub audio: Audio,
+    /// Minimum audio lead ([`Engine::pace`]): a front end whose audio
+    /// callback owns the stream keeps at least this much queued (a deeper
+    /// floor than the pacer's). `None` (the default) keeps the pacer's lead.
+    pub min_audio_lead: Option<Duration>,
     pub settings: Box<dyn Settings>,
 }
 
@@ -121,6 +126,7 @@ impl EngineConfig {
             skip_movies: false,
             short_memcard_screens: true,
             audio: Audio::Device,
+            min_audio_lead: None,
             settings,
         }
     }
@@ -161,6 +167,7 @@ pub struct Engine {
     pads: [u16; 2],
     sticks: [[u8; 4]; 2],
     pacer: Pacer,
+    min_audio_lead: Option<Duration>,
     catch_up: bool,
     display_hz: f64,
     paused: bool,
@@ -215,6 +222,7 @@ impl Engine {
             pads: [0; 2],
             sticks: [[0x80; 4]; 2],
             pacer: Pacer::default(),
+            min_audio_lead: config.min_audio_lead,
             catch_up: false,
             display_hz: 60.0,
             paused: false,
@@ -353,9 +361,15 @@ impl Engine {
             }
             return Pace::Wait(self.pacer.wait(now, period));
         }
-        ssx3_ps2::machine::set_audio_lead_frames((self.pacer.audio_lead() * 48000.0) as u32);
+        ssx3_ps2::machine::set_audio_lead_frames((self.audio_lead() * 48000.0) as u32);
         tick::set_updates_per_vsync(plan.updates_per_vsync);
         Pace::Run(plan.vsyncs)
+    }
+
+    /// Audio to keep queued (s): the pacer's lead, at least the front end's
+    /// ([`EngineConfig::min_audio_lead`]).
+    fn audio_lead(&self) -> f64 {
+        audio_lead_secs(self.pacer.audio_lead(), self.min_audio_lead)
     }
 
     /// [`Engine::pace`] and the VSyncs it asks for, in one call (for a front
@@ -437,20 +451,22 @@ impl Engine {
         self.sync_audio();
     }
 
-    /// [`Audio::Pull`]: append the sound produced since the last call to
-    /// `out`, interleaved stereo i16 at 48 kHz ([`ssx3_iop::audio::RATE`]).
-    /// Returns the stereo frames appended (none while paused or
-    /// [`Engine::audio_suspend`]ed). Call it once per presented image or from
-    /// the front end's audio callback (any thread: [`ssx3_iop::audio::pull`]
-    /// and [`ssx3_iop::audio::pull_into`] are the same without the engine).
+    /// [`Audio::Pull`]: append the sound produced
+    /// since the last call to `out`, interleaved stereo i16 at 48 kHz
+    /// ([`ssx3_iop::audio::RATE`]). Returns the stereo frames appended (none
+    /// while paused or [`Engine::audio_suspend`]ed). Call it once per
+    /// presented image or from the front end's audio callback (any thread:
+    /// [`ssx3_iop::audio::pull`] and [`ssx3_iop::audio::pull_into`] are the
+    /// same without the engine).
     pub fn audio_pull(&mut self, out: &mut Vec<i16>) -> usize {
         ssx3_iop::audio::pull(out)
     }
 
-    /// [`Audio::Pull`]: the stereo frames the front end has buffered but not
-    /// played yet, so the game mixes ahead to keep its stream fed when it
-    /// catches up ([`ssx3_iop::audio::report_buffered`]; a front end pulling
-    /// from its audio callback with `pull_into` is counted without this).
+    /// [`Audio::Pull`]: the stereo frames the front end has buffered but
+    /// not played yet, so the game mixes ahead to keep its stream fed when
+    /// it catches up ([`ssx3_iop::audio::report_buffered`]; a front end
+    /// pulling from its audio callback with `pull_into` is counted without
+    /// this).
     pub fn audio_buffered(&mut self, frames: usize) {
         ssx3_iop::audio::report_buffered(frames)
     }
@@ -562,5 +578,40 @@ impl Engine {
     /// `SSX3_SHADOWS`, `SSX3_BLOOM`, `SSX3_SNOW`).
     pub fn gfx_options(&self) -> ssx3_gfx::Options {
         render::gfx_options(&*self.settings)
+    }
+}
+
+/// The audio lead the mixer keeps (s): the pacer's, at least the front
+/// end's floor ([`EngineConfig::min_audio_lead`]); `None` keeps the pacer's.
+fn audio_lead_secs(pacer: f64, floor: Option<Duration>) -> f64 {
+    floor.map_or(pacer, |floor| pacer.max(floor.as_secs_f64()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_floor_keeps_the_pacer_lead() {
+        assert_eq!(audio_lead_secs(0.06, None), 0.06);
+        assert_eq!(audio_lead_secs(0.18, None), 0.18);
+    }
+
+    #[test]
+    fn floor_lifts_a_short_lead_only() {
+        let floor = Some(Duration::from_millis(84));
+        assert_eq!(
+            audio_lead_secs(0.06, floor),
+            Duration::from_millis(84).as_secs_f64()
+        );
+        assert_eq!(audio_lead_secs(0.12, floor), 0.12);
+    }
+
+    #[test]
+    fn new_config_has_no_audio_floor() {
+        assert_eq!(
+            EngineConfig::new(Box::new(EnvSettings)).min_audio_lead,
+            None
+        );
     }
 }

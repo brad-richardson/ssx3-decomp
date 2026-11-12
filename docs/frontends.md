@@ -37,6 +37,7 @@ pub struct EngineConfig {
     pub skip_movies: bool,          // default; SSX3_SKIP_MOVIES overrides
     pub short_memcard_screens: bool, // default true; SSX3_SHORT_MEMCARD_SCREENS overrides
     pub audio: Audio,               // Device (default) | Off | Pull; SSX3_AUDIO overrides
+    pub min_audio_lead: Option<Duration>, // keep at least this much queued (mobile cpal); None = the pacer's lead
     pub settings: Box<dyn Settings>,
 }
 impl EngineConfig { pub fn new(settings: Box<dyn Settings>) -> Self; }
@@ -179,15 +180,15 @@ The engine re-exports the crates a front end touches (`ssx3_ps2`,
 | --- | --- |
 | `Device` (default) | The engine opens the default output device itself (cpal). |
 | `Off` | No output (the headless runner). |
-| `Pull` | The front end owns the device: `engine.audio_pull(&mut Vec<i16>)` appends the samples mixed since the last call (interleaved stereo; returns the frames). From an audio callback on another thread, `ssx3_iop::audio::pull` / `pull_into(&mut [i16])` do the same without the engine. The browser uses it: the worker pulls once per presented frame and the page plays the samples with an AudioWorklet. |
+| `Pull` | The front end owns the device: `engine.audio_pull(&mut Vec<i16>)` appends the samples mixed since the last call (interleaved stereo; returns the frames). From an audio callback on another thread, `ssx3_iop::audio::pull` / `pull_into(&mut [i16])` do the same without the engine. The browser uses it: the worker pulls once per presented frame and the page plays the samples with an AudioWorklet. Mobile cpal uses it from its callback; `EngineConfig::min_audio_lead` keeps at least that much queued (84 ms on mobile). |
 
 The game is not in lock step with the sound card: at most ~200 ms is
 queued, newer samples are dropped while it is full, and the front end
 plays silence when it runs dry. Paused or `audio_suspend`ed, the queue is
 dropped and nothing is pulled. The `SSX3_AUDIO` setting overrides the
-choice (`0` off, `pull`, `null` a silent device drained in real time for
-tests, any other value the device); `SSX3_WAV=file.wav` records the sound
-whatever the output.
+choice (`0` off, `pull`, `null` a silent device drained
+in real time for tests, any other value the device); `SSX3_WAV=file.wav`
+records the sound whatever the output.
 
 With `Pull` and catch-up on, the game mixes ahead while the queue is short,
 so the stream stays fed when the game runs several VSyncs at once. It can
@@ -195,8 +196,9 @@ only do that when it knows how much is queued: a front end that pulls from
 its audio callback with `pull_into` is counted automatically (the queue is
 the engine's ring), and one that keeps its own buffer reports it with
 `engine.audio_buffered(frames)` (or `ssx3_iop::audio::report_buffered`)
-whenever it changes. A front end that does neither (the browser, which
-pulls once per presented frame) is not topped up.
+whenever it changes. The queue counts from the start, so no report is
+needed to be topped up; a front end that never enables catch-up (the
+browser, which pulls once per presented frame) is not topped up.
 
 ## Using this repository from another one
 
