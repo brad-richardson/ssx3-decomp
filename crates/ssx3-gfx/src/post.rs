@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
-use crate::options::{Aa, Ao, Bloom, Options};
+use crate::options::{Aa, Bloom, Options};
 
 /// Pass uniforms (`P` in post.wgsl).
 #[derive(Clone, Copy, Default)]
@@ -527,8 +527,8 @@ impl Post {
         );
     }
 
-    /// Ambient occlusion onto the image (before the game's post passes), at
-    /// `level` (not [`Ao::Off`]).
+    /// Ambient occlusion onto the image (before the game's post passes),
+    /// computed at half resolution and upsampled along depth edges.
     #[allow(clippy::too_many_arguments)]
     pub fn ao(
         &mut self,
@@ -538,10 +538,8 @@ impl Post {
         f: &Frame,
         cam: Option<&crate::gs::Cam>,
         fxy: (f32, f32),
-        level: Ao,
     ) {
-        let half = level == Ao::Fast;
-        let stride = if half { 2 } else { 1 };
+        let stride = 2;
         let (aw, ah) = (f.w.div_ceil(stride), f.h.div_ceil(stride));
         let made =
             |t: &wgpu::Texture, w: u32, h: u32| (t.width(), t.height()) == (w.max(1), h.max(1));
@@ -582,8 +580,7 @@ impl Post {
             a0.create_view(&Default::default()),
             a1.create_view(&Default::default()),
         );
-        // The last pass (the second blur, or the upsample at half
-        // resolution) multiplies its result onto the image.
+        // The upsample pass multiplies its result onto the image.
         let apply = if show("ao") {
             Write::Rgb
         } else {
@@ -605,7 +602,7 @@ impl Post {
             dev,
             queue,
             enc,
-            if half { "fs_ao_half" } else { "fs_ao" },
+            "fs_ao",
             &a0,
             Write::All,
             None,
@@ -632,18 +629,13 @@ impl Post {
                 ..u
             },
         );
-        let (last, write) = if half {
-            (&a0, Write::All)
-        } else {
-            (f.color, apply)
-        };
         self.pass_with(
             dev,
             queue,
             enc,
             "fs_ao_blur",
-            last,
-            write,
+            &a0,
+            Write::All,
             Some(&v1),
             None,
             None,
@@ -654,22 +646,20 @@ impl Post {
                 ..u
             },
         );
-        if half {
-            self.pass_with(
-                dev,
-                queue,
-                enc,
-                "fs_ao_up",
-                f.color,
-                apply,
-                Some(&v0),
-                Some(&zv),
-                None,
-                None,
-                Some(&lv),
-                u,
-            );
-        }
+        self.pass_with(
+            dev,
+            queue,
+            enc,
+            "fs_ao_up",
+            f.color,
+            apply,
+            Some(&v0),
+            Some(&zv),
+            None,
+            None,
+            Some(&lv),
+            u,
+        );
     }
 
     /// Sun shadows onto the image (before the game's post passes): `smap`

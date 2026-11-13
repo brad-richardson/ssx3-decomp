@@ -30,7 +30,7 @@ mod post;
 mod shadow;
 pub mod tex;
 
-pub use options::{Aa, Ao, Bloom, Options};
+pub use options::{Aa, Bloom, Options};
 pub use shadow::{set_debug_knob, DEBUG_KNOBS};
 
 use std::collections::HashMap;
@@ -1860,7 +1860,7 @@ impl Inner {
         let hud_post = opts.bloom == Bloom::Modern || opts.aa != Aa::Off;
         // (Sun shadows are applied by the draws themselves: they need the
         // split only for their debug views.)
-        let ao_at = if opts.ao != Ao::Off || (opts.shadows && post::debug_view() != 0.0) {
+        let ao_at = if opts.ao || (opts.shadows && post::debug_view() != 0.0) {
             items
                 .iter()
                 .position(|it| it.tag.post.is_some() || it.tag.hud)
@@ -1876,7 +1876,7 @@ impl Inner {
         } else {
             usize::MAX
         };
-        if (opts.ao != Ao::Off || ao_at != usize::MAX || hud_post) && self.post.is_none() {
+        if (opts.ao || ao_at != usize::MAX || hud_post) && self.post.is_none() {
             self.post = Some(post::Post::new(&self.dev));
         }
         if let Some(po) = self.post.as_mut() {
@@ -2167,7 +2167,7 @@ impl Inner {
                             l,
                         );
                     }
-                    if opts.ao != Ao::Off {
+                    if opts.ao {
                         po.ao(
                             &self.dev,
                             &self.queue,
@@ -2175,7 +2175,6 @@ impl Inner {
                             &post_frame,
                             self.gs.cam.as_ref(),
                             self.fxy,
-                            opts.ao,
                         );
                     }
                 }
@@ -2398,7 +2397,7 @@ impl Inner {
                         l,
                     );
                 }
-                if opts.ao != Ao::Off {
+                if opts.ao {
                     po.ao(
                         &self.dev,
                         &self.queue,
@@ -2406,7 +2405,6 @@ impl Inner {
                         &post_frame,
                         self.gs.cam.as_ref(),
                         self.fxy,
-                        opts.ao,
                     );
                 }
             }

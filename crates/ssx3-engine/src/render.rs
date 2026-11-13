@@ -169,7 +169,22 @@ fn lensfx_visibility(f: &[f32], w: u32, h: u32, z: &dyn Fn(u32, u32) -> u32) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::lensfx_visibility;
+    use super::{gfx_options, lensfx_visibility};
+
+    #[test]
+    fn ao_is_on_or_off_only() {
+        // `SSX3_AO` has no level: unset, empty and "0" are off, any other
+        // value (including the former "fast") is simply on.
+        let ao = |v: Option<&str>| {
+            let s = |k: &str| (k == "SSX3_AO").then(|| v.map(str::to_owned)).flatten();
+            gfx_options(&s).ao
+        };
+        assert!(!ao(None));
+        assert!(!ao(Some("")));
+        assert!(!ao(Some("0")));
+        assert!(ao(Some("1")));
+        assert!(ao(Some("fast")));
+    }
 
     /// A 16×16 query at (8, 8), light depth 1000, over a 64×64 Z buffer.
     fn query(x: f32, y: f32) -> [f32; 10] {
@@ -269,11 +284,7 @@ pub fn gfx_options(s: &dyn Settings) -> ssx3_gfx::Options {
         lod_bias: get("SSX3_LOD_BIAS")
             .and_then(|v| v.parse::<f32>().ok())
             .map_or(0.0, |b| b.clamp(-2.0, 2.0)),
-        ao: match get("SSX3_AO").as_deref() {
-            Some("fast") => ssx3_gfx::Ao::Fast,
-            Some(v) if v != "0" => ssx3_gfx::Ao::Full,
-            _ => ssx3_gfx::Ao::Off,
-        },
+        ao: on("SSX3_AO"),
         shadows: on("SSX3_SHADOWS"),
         bloom: match get("SSX3_BLOOM").as_deref() {
             Some("modern") => ssx3_gfx::Bloom::Modern,

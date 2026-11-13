@@ -359,21 +359,14 @@ fn ao_noise(pos: vec2<f32>) -> f32 {
     return fract(52.9829189 * fract(dot(pos, vec2<f32>(0.06711056, 0.00583715))));
 }
 
-@fragment
-fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(vec3<f32>(ao_at(vec2<i32>(v.pos.xy), ao_noise(v.pos.xy), 12)), 1.0);
-}
-
 // Half resolution: each AO pixel is the AO of the target pixel at twice its
 // position.
 @fragment
-fn fs_ao_half(v: VOut) -> @location(0) vec4<f32> {
+fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(vec3<f32>(ao_at(2 * vec2<i32>(v.pos.xy), ao_noise(v.pos.xy), 12)), 1.0);
 }
 
-// Separable blur of the AO (in AO pixels), edge-aware by depth. At full
-// resolution the second pass writes the AO as a colour, multiplied onto the
-// image (blend: dst × src).
+// Separable blur of the AO (in AO pixels), edge-aware by depth.
 @fragment
 fn fs_ao_blur(v: VOut) -> @location(0) vec4<f32> {
     let k = i32(max(p.stride, 1u));
@@ -391,9 +384,9 @@ fn fs_ao_blur(v: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(vec3<f32>(sum / max(wsum, 1e-4)), 1.0);
 }
 
-// Half resolution: this pixel's AO from the four nearest AO pixels, weighted
-// by distance and by how near their view depth is to this pixel's (so the
-// AO does not cross depth edges), multiplied onto the image.
+// This pixel's AO from the four nearest AO pixels, weighted by distance
+// and by how near their view depth is to this pixel's (so the AO does not
+// cross depth edges), multiplied onto the image.
 @fragment
 fn fs_ao_up(v: VOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(v.pos.xy);
