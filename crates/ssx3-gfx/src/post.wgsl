@@ -336,7 +336,8 @@ fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(vec3<f32>(clamp(ao, 0.0, 1.0)), 1.0);
 }
 
-// Separable blur of the AO, edge-aware by depth.
+// Separable blur of the AO, edge-aware by depth. The second pass writes the
+// AO as a colour, multiplied onto the image (blend: dst × src).
 @fragment
 fn fs_ao_blur(v: VOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(v.pos.xy);
@@ -350,13 +351,6 @@ fn fs_ao_blur(v: VOut) -> @location(0) vec4<f32> {
         wsum = wsum + w;
     }
     return vec4<f32>(vec3<f32>(sum / max(wsum, 1e-4)), 1.0);
-}
-
-// The AO as a colour, multiplied onto the image (blend: dst × src).
-@fragment
-fn fs_ao_apply(v: VOut) -> @location(0) vec4<f32> {
-    let a = textureLoad(src, vec2<i32>(v.pos.xy), 0).r;
-    return vec4<f32>(vec3<f32>(a), 1.0);
 }
 
 // ---------------------------------------------------------------- camera

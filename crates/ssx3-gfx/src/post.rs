@@ -559,8 +559,8 @@ impl Post {
                 0.0,
             ];
         }
-        Self::copy(enc, f.depth, f.zsnap);
-        let zv = f.zsnap.create_view(&Default::default());
+        // (No render pass has the depth attached here: it is read as is.)
+        let zv = f.depth.create_view(&Default::default());
         let lin = self
             .ao_depth
             .get_or_insert_with(|| target(dev, f.w, f.h, AO_DEPTH_FORMAT, "ssx3-gfx ao depth"))
@@ -571,6 +571,12 @@ impl Post {
             a0.create_view(&Default::default()),
             a1.create_view(&Default::default()),
         );
+        // The second blur pass multiplies its result onto the image.
+        let apply = if show("ao") {
+            Write::Rgb
+        } else {
+            Write::Multiply
+        };
         self.pass(
             dev,
             queue,
@@ -619,8 +625,8 @@ impl Post {
             queue,
             enc,
             "fs_ao_blur",
-            &a0,
-            Write::All,
+            f.color,
+            apply,
             Some(&v1),
             None,
             None,
@@ -630,23 +636,6 @@ impl Post {
                 dir: [0.0, 1.0],
                 ..u
             },
-        );
-        let w = if show("ao") {
-            Write::Rgb
-        } else {
-            Write::Multiply
-        };
-        self.pass(
-            dev,
-            queue,
-            enc,
-            "fs_ao_apply",
-            f.color,
-            w,
-            Some(&v0),
-            None,
-            None,
-            u,
         );
     }
 
