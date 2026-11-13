@@ -29,10 +29,13 @@ struct U {
     light: [[f32; 4]; 4],
     sun: [f32; 4],
     sp: [f32; 4],
+    /// Ambient occlusion with the terrain camera: the camera's rays
+    /// ([`ao_rays`]).
+    ray: [[f32; 4]; 4],
 }
 
 /// Uniform buffer size (`P` in post.wgsl).
-const U_BYTES: usize = 288;
+const U_BYTES: usize = 352;
 
 impl U {
     fn bytes(&self) -> Vec<u8> {
@@ -56,6 +59,7 @@ impl U {
         for v in [&self.sun, &self.sp] {
             w.extend(v.iter().map(|v| v.to_bits()));
         }
+        w.extend(self.ray.iter().flatten().map(|v| v.to_bits()));
         debug_assert_eq!(w.len() * 4, U_BYTES);
         w.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
@@ -136,6 +140,8 @@ fn shadow_cascade() -> usize {
 /// Formats of the intermediate textures.
 const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// The AO's view depth: 32-bit, as positions are rebuilt from it.
+const AO_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// Bloom pyramid levels (half size down to 1/64).
 const BLOOM_LEVELS: usize = 6;
 /// Uniform buffers per frame (each pass uses its own).
@@ -154,9 +160,11 @@ pub struct Post {
     dummy_depth: wgpu::TextureView,
     /// The shadow map's comparison sampler.
     cmp: wgpu::Sampler,
-    /// Bloom pyramid and AO buffers, for the size they were made for.
+    /// Bloom pyramid and AO buffers (the AO and its view depth), for the
+    /// size they were made for.
     bloom: Vec<(wgpu::Texture, u32, u32)>,
     ao: Vec<wgpu::Texture>,
+    ao_depth: Option<wgpu::Texture>,
     size: (u32, u32),
 }
 
@@ -216,6 +224,8 @@ impl Post {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // The AO's view depth.
+                tex_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
         let pipe_layout = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -288,6 +298,7 @@ impl Post {
             cmp,
             bloom: Vec::new(),
             ao: Vec::new(),
+            ao_depth: None,
             size: (0, 0),
         }
     }
@@ -383,11 +394,11 @@ impl Post {
         u: U,
     ) {
         self.pass_with(
-            dev, queue, enc, entry, target, write, src, depth, image, None, u,
+            dev, queue, enc, entry, target, write, src, depth, image, None, None, u,
         )
     }
 
-    /// [`Post::pass`] with the shadow map bound.
+    /// [`Post::pass`] with the shadow map or the AO's view depth bound.
     #[allow(clippy::too_many_arguments)]
     fn pass_with(
         &mut self,
@@ -401,6 +412,7 @@ impl Post {
         depth: Option<&wgpu::TextureView>,
         image: Option<&wgpu::TextureView>,
         smap: Option<&wgpu::TextureView>,
+        ao_depth: Option<&wgpu::TextureView>,
         u: U,
     ) {
         let pipe = self.pipe(dev, entry, target.format(), write);
@@ -444,6 +456,12 @@ impl Post {
                     binding: 6,
                     resource: wgpu::BindingResource::Sampler(&self.cmp),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        ao_depth.unwrap_or(&self.dummy_tex),
+                    ),
+                },
             ],
         });
         let view = target.create_view(&Default::default());
@@ -478,23 +496,7 @@ impl Post {
             return;
         }
         self.size = (w, h);
-        let mk = |w: u32, h: u32, format, label| {
-            dev.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width: w.max(1),
-                    height: h.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-        };
+        let mk = |w, h, format, label| target(dev, w, h, format, label);
         self.bloom = (1..=BLOOM_LEVELS)
             .map(|i| {
                 let (bw, bh) = ((w >> i).max(1), (h >> i).max(1));
@@ -502,6 +504,7 @@ impl Post {
             })
             .collect();
         self.ao = (0..2).map(|_| mk(w, h, AO_FORMAT, "ssx3-gfx ao")).collect();
+        self.ao_depth = None;
     }
 
     fn copy(enc: &mut wgpu::CommandEncoder, from: &wgpu::Texture, to: &wgpu::Texture) {
@@ -543,10 +546,11 @@ impl Post {
             strength: 0.75,
             ..Default::default()
         };
-        if let Some((w2s, s2w, _)) = cam.and_then(cam_matrices) {
-            let c = cam.unwrap();
+        let rays = cam.and_then(|c| Some((c, cam_matrices(c)?, ao_rays(c, fxy)?)));
+        if let Some((c, (w2s, s2w, _), ray)) = rays {
             u.w2s = w2s;
             u.s2w = s2w;
+            u.ray = ray;
             u.off = [c.off[0], c.off[1], fxy.0, fxy.1];
             u.zp = [
                 c.zmax as f32 + 1.0,
@@ -557,6 +561,11 @@ impl Post {
         }
         Self::copy(enc, f.depth, f.zsnap);
         let zv = f.zsnap.create_view(&Default::default());
+        let lin = self
+            .ao_depth
+            .get_or_insert_with(|| target(dev, f.w, f.h, AO_DEPTH_FORMAT, "ssx3-gfx ao depth"))
+            .clone();
+        let lv = lin.create_view(&Default::default());
         let (a0, a1) = (self.ao[0].clone(), self.ao[1].clone());
         let (v0, v1) = (
             a0.create_view(&Default::default()),
@@ -566,15 +575,29 @@ impl Post {
             dev,
             queue,
             enc,
-            "fs_ao",
-            &a0,
+            "fs_ao_depth",
+            &lin,
             Write::All,
             None,
             Some(&zv),
             None,
             u,
         );
-        self.pass(
+        self.pass_with(
+            dev,
+            queue,
+            enc,
+            "fs_ao",
+            &a0,
+            Write::All,
+            None,
+            Some(&zv),
+            None,
+            None,
+            Some(&lv),
+            u,
+        );
+        self.pass_with(
             dev,
             queue,
             enc,
@@ -582,14 +605,16 @@ impl Post {
             &a1,
             Write::All,
             Some(&v0),
-            Some(&zv),
             None,
+            None,
+            None,
+            Some(&lv),
             U {
                 dir: [1.0, 0.0],
                 ..u
             },
         );
-        self.pass(
+        self.pass_with(
             dev,
             queue,
             enc,
@@ -597,8 +622,10 @@ impl Post {
             &a0,
             Write::All,
             Some(&v1),
-            Some(&zv),
             None,
+            None,
+            None,
+            Some(&lv),
             U {
                 dir: [0.0, 1.0],
                 ..u
@@ -677,6 +704,7 @@ impl Post {
             Some(&zv),
             None,
             Some(smap),
+            None,
             u,
         );
     }
@@ -794,6 +822,30 @@ impl Post {
     }
 }
 
+/// A `w`×`h` texture the passes draw into and read.
+fn target(
+    dev: &wgpu::Device,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+    label: &'static str,
+) -> wgpu::Texture {
+    dev.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
 /// World → GS screen (homogeneous, rows) of a terrain camera:
 /// screen = gO·w + gS ∘ (M·p).
 pub(crate) fn screen_matrix(c: &crate::gs::Cam) -> [[f64; 4]; 4] {
@@ -826,6 +878,15 @@ pub(crate) fn unproject(inv: &[[f64; 4]; 4], x: f64, y: f64, z: f64) -> [f64; 3]
 /// the game's world coordinates are large (≈ 10⁵), too large for f32
 /// reconstruction. Also that point (world).
 pub(crate) fn cam_matrices(c: &crate::gs::Cam) -> Option<([[f32; 4]; 4], [[f32; 4]; 4], [f64; 3])> {
+    let (s2, inv2, o) = rebased(c)?;
+    let cols = |a: [[f64; 4]; 4]| -> [[f32; 4]; 4] {
+        std::array::from_fn(|k| std::array::from_fn(|r| a[r][k] as f32))
+    };
+    Some((cols(s2), cols(inv2), o))
+}
+
+/// [`cam_matrices`] in rows and f64.
+fn rebased(c: &crate::gs::Cam) -> Option<([[f64; 4]; 4], [[f64; 4]; 4], [f64; 3])> {
     let s = screen_matrix(c);
     let inv = invert(s)?;
     let k = if c.xyzf { 1.0 } else { 16.0 };
@@ -841,10 +902,44 @@ pub(crate) fn cam_matrices(c: &crate::gs::Cam) -> Option<([[f32; 4]; 4], [[f32; 
             inv2[r][c4] -= o[r] * inv[3][c4];
         }
     }
-    let cols = |a: [[f64; 4]; 4]| -> [[f32; 4]; 4] {
-        std::array::from_fn(|k| std::array::from_fn(|r| a[r][k] as f32))
+    Some((s2, inv2, o))
+}
+
+/// The terrain camera's rays for the AO (columns, `ray` in post.wgsl), in
+/// [`cam_matrices`]' coordinates: the camera, then the offset from it per
+/// unit of view depth along target pixel (0, 0)'s ray and that offset's
+/// change per target pixel in x and y. The point at view depth `w` on the
+/// ray through target point `q` is `camera + w · (d0 + q.x · dx + q.y · dy)`
+/// (exact for a perspective camera: both depend linearly on the screen
+/// position at a fixed view depth). `fxy`: target pixels per GS pixel.
+pub(crate) fn ao_rays(c: &crate::gs::Cam, fxy: (f32, f32)) -> Option<[[f32; 4]; 4]> {
+    let (s, inv, _) = rebased(c)?;
+    // The camera: the point the screen's x, y and w all vanish at.
+    let h = mul4(&inv, [0.0, 0.0, 1.0, 0.0]);
+    if h[3].abs() < 1e-12 {
+        return None;
+    }
+    let cam = [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
+    let z = c.zmax as f64 * 0.5 / if c.xyzf { 1.0 } else { 16.0 };
+    // The offset per unit view depth along GS screen point (x, y)'s ray.
+    let per_w = |x: f64, y: f64| -> Option<[f64; 3]> {
+        let p = unproject(&inv, x, y, z);
+        let w = mul4(&s, [p[0], p[1], p[2], 1.0])[3];
+        (w.abs() > 1e-12).then(|| std::array::from_fn(|i| (p[i] - cam[i]) / w))
     };
-    Some((cols(s2), cols(inv2), o))
+    // Target pixel q is GS screen point q / fxy - 0.5 + XYOFFSET.
+    let (x0, y0) = (c.off[0] as f64 - 0.5, c.off[1] as f64 - 0.5);
+    let d0 = per_w(x0, y0)?;
+    let dx = per_w(x0 + 1.0, y0)?;
+    let dy = per_w(x0, y0 + 1.0)?;
+    let col = |v: [f64; 3], k: f64| [v[0] as f32, v[1] as f32, v[2] as f32, k as f32];
+    let step = |a: [f64; 3], f: f32| col(std::array::from_fn(|i| (a[i] - d0[i]) / f as f64), 0.0);
+    Some([
+        col(cam, 1.0),
+        col(d0, 0.0),
+        step(dx, fxy.0),
+        step(dy, fxy.1),
+    ])
 }
 
 /// The inverse of a 4×4 matrix (rows), by Gauss-Jordan elimination.
@@ -896,6 +991,47 @@ mod tests {
             for c in 0..4 {
                 let v: f64 = (0..4).map(|k| a[r][k] * b[k][c]).sum();
                 assert!((v - if r == c { 1.0 } else { 0.0 }).abs() < 1e-9);
+            }
+        }
+    }
+    #[test]
+    fn ao_rays_rebuild_unprojected_points() {
+        // A perspective camera (rows: x, y, 0.5 z + 10, z), its guard
+        // mapping onto a 4096-wide screen, a 2× target.
+        let mut m = [[0f32; 4]; 4];
+        m[0][0] = 1.0;
+        m[1][1] = 1.0;
+        m[2][2] = 0.5;
+        m[2][3] = 1.0;
+        m[3][2] = 10.0;
+        let c = crate::gs::Cam {
+            m,
+            gscale: [500.0, -500.0, 1.0e6, 1.0],
+            goffset: [2048.0, 2048.0, 0.0, 0.0],
+            off: [1728.0, 1824.0],
+            zmax: 0xff_ffff,
+            xyzf: false,
+        };
+        let fxy = (2.0, 2.0);
+        let (s, inv, _) = rebased(&c).unwrap();
+        let r = ao_rays(&c, fxy).unwrap();
+        for (qx, qy) in [(0.5, 0.5), (640.5, 448.5), (1279.5, 3.5)] {
+            let (x, y) = (
+                qx / fxy.0 as f64 - 0.5 + 1728.0,
+                qy / fxy.1 as f64 - 0.5 + 1824.0,
+            );
+            for z in [1.0e5, 5.0e5, 9.0e5] {
+                let pt = unproject(&inv, x, y, z);
+                let w = mul4(&s, [pt[0], pt[1], pt[2], 1.0])[3];
+                for i in 0..3 {
+                    let d = r[1][i] as f64 + qx * r[2][i] as f64 + qy * r[3][i] as f64;
+                    let got = r[0][i] as f64 + w * d;
+                    assert!(
+                        (got - pt[i]).abs() < 1e-3 * (1.0 + pt[i].abs()),
+                        "{qx} {qy} {z}: {got} vs {}",
+                        pt[i]
+                    );
+                }
             }
         }
     }

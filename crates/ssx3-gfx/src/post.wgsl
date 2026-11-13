@@ -21,6 +21,10 @@ struct P {
     light: mat4x4<f32>,
     sun: vec4<f32>,
     sp: vec4<f32>,
+    // AO with the terrain camera: the camera, then the offset from it per
+    // unit of view depth along target pixel (0, 0)'s ray, and its change per
+    // target pixel in x and y (post.rs `ao_rays`).
+    ray: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> p: P;
@@ -32,6 +36,8 @@ struct P {
 // The shadow map (shadow.rs) and its comparison sampler.
 @group(0) @binding(5) var smap: texture_depth_2d;
 @group(0) @binding(6) var scmp: sampler_comparison;
+// The AO's view depth (fs_ao_depth).
+@group(0) @binding(7) var ao_depth: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) pos: vec4<f32>,
@@ -232,6 +238,27 @@ fn view_w(px: vec2<f32>, d: f32) -> f32 {
     return (p.w2s * vec4<f32>(w, 1.0)).w;
 }
 
+// The view depth once per pixel, for the other AO passes.
+@fragment
+fn fs_ao_depth(v: VOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(vdepth(vec2<i32>(v.pos.xy)), 0.0, 0.0, 1.0);
+}
+
+// Pixel `q`'s view depth (fs_ao_depth).
+fn view_depth(q: vec2<i32>) -> f32 {
+    let qs = clamp(q, vec2<i32>(0), vec2<i32>(p.size) - vec2<i32>(1));
+    return textureLoad(ao_depth, qs, 0).r;
+}
+
+// Pixel `q`'s position relative to the camera (terrain camera): its view
+// depth along its ray.
+fn rpos(q: vec2<i32>) -> vec3<f32> {
+    let qs = clamp(q, vec2<i32>(0), vec2<i32>(p.size) - vec2<i32>(1));
+    let c = vec2<f32>(qs) + 0.5;
+    let w = textureLoad(ao_depth, qs, 0).r;
+    return w * (p.ray[1].xyz + c.x * p.ray[2].xyz + c.y * p.ray[3].xyz);
+}
+
 // World position of pixel `q` (terrain camera).
 fn wpos(q: vec2<i32>) -> vec3<f32> {
     let qs = clamp(q, vec2<i32>(0), vec2<i32>(p.size) - vec2<i32>(1));
@@ -241,25 +268,27 @@ fn wpos(q: vec2<i32>) -> vec3<f32> {
 // With the camera: occlusion by the points above the surface's tangent
 // plane within a world-space radius (normal from the neighbours' positions,
 // the shorter difference each way so no normal spans a depth edge).
+// (Positions relative to the camera: only their differences matter, but
+// the screen radius needs the world one.)
 fn ao_world(v: VOut) -> f32 {
     let px = vec2<i32>(v.pos.xy);
-    let pc = wpos(px);
-    let rx = wpos(px + vec2<i32>(1, 0)) - pc;
-    let lx = pc - wpos(px - vec2<i32>(1, 0));
-    let dy = wpos(px + vec2<i32>(0, 1)) - pc;
-    let uy = pc - wpos(px - vec2<i32>(0, 1));
+    let pc = rpos(px);
+    let rx = rpos(px + vec2<i32>(1, 0)) - pc;
+    let lx = pc - rpos(px - vec2<i32>(1, 0));
+    let dy = rpos(px + vec2<i32>(0, 1)) - pc;
+    let uy = pc - rpos(px - vec2<i32>(0, 1));
     let ex = select(lx, rx, dot(rx, rx) < dot(lx, lx));
     let ey = select(uy, dy, dot(dy, dy) < dot(uy, uy));
     var n = normalize(cross(ex, ey));
-    // Towards the camera: along the pixel's ray, from far to near.
-    let s0 = to_screen(pc).xy;
-    let to_cam = normalize(to_world(s0, 0.9).xyz - to_world(s0, 0.0001).xyz);
-    if (dot(n, to_cam) < 0.0) {
+    // Towards the camera.
+    if (dot(n, pc) > 0.0) {
         n = -n;
     }
     // World radius, and its size on screen.
     let rw = 80.0;
-    let rpx = max(max(length(to_screen(pc + vec3<f32>(rw, 0.0, 0.0)).xy - s0), length(to_screen(pc + vec3<f32>(0.0, rw, 0.0)).xy - s0)), length(to_screen(pc + vec3<f32>(0.0, 0.0, rw)).xy - s0));
+    let pw = p.ray[0].xyz + pc;
+    let s0 = to_screen(pw).xy;
+    let rpx = max(max(length(to_screen(pw + vec3<f32>(rw, 0.0, 0.0)).xy - s0), length(to_screen(pw + vec3<f32>(0.0, rw, 0.0)).xy - s0)), length(to_screen(pw + vec3<f32>(0.0, 0.0, rw)).xy - s0));
     let r = clamp(rpx, 2.0, p.size.y * 0.08);
     let noise = fract(52.9829189 * fract(dot(v.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
     var occ = 0.0;
@@ -268,7 +297,7 @@ fn ao_world(v: VOut) -> f32 {
         let fi = f32(i);
         let a = (fi + noise) * 2.3999632;
         let rr = r * sqrt((fi + 0.5) / f32(ns));
-        let d = wpos(px + vec2<i32>(vec2<f32>(cos(a), sin(a)) * rr)) - pc;
+        let d = rpos(px + vec2<i32>(vec2<f32>(cos(a), sin(a)) * rr)) - pc;
         let l2 = dot(d, d);
         let fall = max(1.0 - l2 / (4.0 * rw * rw), 0.0);
         occ = occ + max(dot(d, n) / sqrt(l2 + 1e-4) - 0.15, 0.0) * fall;
@@ -286,7 +315,7 @@ fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
     if (p.zp.x > 0.0) {
         return vec4<f32>(vec3<f32>(ao_world(v)), 1.0);
     }
-    let d = vdepth(px);
+    let d = view_depth(px);
     // Interleaved gradient noise rotates the sample pattern per pixel.
     let noise = fract(52.9829189 * fract(dot(v.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
     let r = p.size.y * 0.045;
@@ -297,7 +326,7 @@ fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
         let a = (fi + noise) * 2.3999632;
         let rr = r * sqrt((fi + 0.5) / f32(n));
         let o = vec2<f32>(cos(a), sin(a)) * rr;
-        let ds = vdepth(px + vec2<i32>(o));
+        let ds = view_depth(px + vec2<i32>(o));
         let diff = (d - ds) / d;
         if (diff > 0.004 && diff < 0.25) {
             occ = occ + 1.0 - smoothstep(0.08, 0.25, diff);
@@ -311,12 +340,12 @@ fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_ao_blur(v: VOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(v.pos.xy);
-    let d0 = vdepth(px);
+    let d0 = view_depth(px);
     var sum = 0.0;
     var wsum = 0.0;
     for (var i = -4; i <= 4; i = i + 1) {
         let q = px + vec2<i32>(p.dir * f32(i));
-        let w = exp(-f32(i * i) / 8.0) * select(0.0, 1.0, abs(vdepth(q) - d0) / d0 < 0.05);
+        let w = exp(-f32(i * i) / 8.0) * select(0.0, 1.0, abs(view_depth(q) - d0) / d0 < 0.05);
         sum = sum + textureLoad(src, clamp(q, vec2<i32>(0), vec2<i32>(p.size) - vec2<i32>(1)), 0).r * w;
         wsum = wsum + w;
     }
