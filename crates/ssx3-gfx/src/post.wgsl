@@ -266,24 +266,47 @@ fn wpos(q: vec2<i32>) -> vec3<f32> {
     return to_world(vec2<f32>(qs) + 0.5, textureLoad(depth, qs, 0)).xyz;
 }
 
-// With the camera: occlusion by the points above the surface's tangent
-// plane within a world-space radius (normal from the neighbours' positions,
-// the shorter difference each way so no normal spans a depth edge).
-// (Positions relative to the camera: only their differences matter, but
-// the screen radius needs the world one.)
-fn ao_world(px: vec2<i32>, noise: f32, ns: i32) -> f32 {
-    let pc = rpos(px);
+// Surface normal at target pixel `px` whose camera-relative position is
+// `pc`, from the neighbours' positions (the shorter difference each way so
+// no normal spans a depth edge), facing the camera. At the outermost rows
+// and columns the clamped neighbour is `px` itself, so that difference is
+// zero: fall back to the other side instead of normalising a zero cross
+// product. If both sides are the pixel itself, face the camera.
+fn surf_normal(px: vec2<i32>, pc: vec3<f32>) -> vec3<f32> {
     let rx = rpos(px + vec2<i32>(1, 0)) - pc;
     let lx = pc - rpos(px - vec2<i32>(1, 0));
     let dy = rpos(px + vec2<i32>(0, 1)) - pc;
     let uy = pc - rpos(px - vec2<i32>(0, 1));
-    let ex = select(lx, rx, dot(rx, rx) < dot(lx, lx));
-    let ey = select(uy, dy, dot(dy, dy) < dot(uy, uy));
-    var n = normalize(cross(ex, ey));
+    var ex = select(lx, rx, dot(rx, rx) < dot(lx, lx));
+    if (dot(ex, ex) == 0.0) {
+        ex = rx + lx;
+    }
+    var ey = select(uy, dy, dot(dy, dy) < dot(uy, uy));
+    if (dot(ey, ey) == 0.0) {
+        ey = dy + uy;
+    }
+    let c = cross(ex, ey);
+    if (dot(c, c) == 0.0) {
+        if (dot(pc, pc) == 0.0) {
+            return vec3<f32>(0.0, 0.0, 1.0);
+        }
+        return normalize(-pc);
+    }
+    var n = normalize(c);
     // Towards the camera.
     if (dot(n, pc) > 0.0) {
         n = -n;
     }
+    return n;
+}
+
+// With the camera: occlusion by the points above the surface's tangent
+// plane within a world-space radius.
+// (Positions relative to the camera: only their differences matter, but
+// the screen radius needs the world one.)
+fn ao_world(px: vec2<i32>, noise: f32, ns: i32) -> f32 {
+    let pc = rpos(px);
+    let n = surf_normal(px, pc);
     // World radius, and its size on screen.
     let rw = 80.0;
     let pw = p.ray[0].xyz + pc;
