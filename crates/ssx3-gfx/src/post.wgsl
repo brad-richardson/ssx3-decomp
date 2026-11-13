@@ -5,7 +5,8 @@
 struct P {
     // Source texel size (1 / source size).
     texel: vec2<f32>,
-    pad: u32,
+    // AO: target pixels per AO pixel across (2 at half resolution).
+    stride: u32,
     strength: f32,
     dir: vec2<f32>,
     // Depth: the main target's size in pixels.
@@ -270,8 +271,7 @@ fn wpos(q: vec2<i32>) -> vec3<f32> {
 // the shorter difference each way so no normal spans a depth edge).
 // (Positions relative to the camera: only their differences matter, but
 // the screen radius needs the world one.)
-fn ao_world(v: VOut) -> f32 {
-    let px = vec2<i32>(v.pos.xy);
+fn ao_world(px: vec2<i32>, noise: f32, ns: i32) -> f32 {
     let pc = rpos(px);
     let rx = rpos(px + vec2<i32>(1, 0)) - pc;
     let lx = pc - rpos(px - vec2<i32>(1, 0));
@@ -290,9 +290,7 @@ fn ao_world(v: VOut) -> f32 {
     let s0 = to_screen(pw).xy;
     let rpx = max(max(length(to_screen(pw + vec3<f32>(rw, 0.0, 0.0)).xy - s0), length(to_screen(pw + vec3<f32>(0.0, rw, 0.0)).xy - s0)), length(to_screen(pw + vec3<f32>(0.0, 0.0, rw)).xy - s0));
     let r = clamp(rpx, 2.0, p.size.y * 0.08);
-    let noise = fract(52.9829189 * fract(dot(v.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
     var occ = 0.0;
-    let ns = 12;
     for (var i = 0; i < ns; i = i + 1) {
         let fi = f32(i);
         let a = (fi + noise) * 2.3999632;
@@ -305,26 +303,23 @@ fn ao_world(v: VOut) -> f32 {
     return clamp(1.0 - p.strength * 3.0 * occ / f32(ns), 0.0, 1.0);
 }
 
-@fragment
-fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
-    let px = vec2<i32>(v.pos.xy);
+// The AO at target pixel `px` from `ns` samples, their pattern rotated by
+// `noise`.
+fn ao_at(px: vec2<i32>, noise: f32, ns: i32) -> f32 {
     let z = textureLoad(depth, px, 0);
     if (z <= 1e-6) {
-        return vec4<f32>(1.0);
+        return 1.0;
     }
     if (p.zp.x > 0.0) {
-        return vec4<f32>(vec3<f32>(ao_world(v)), 1.0);
+        return ao_world(px, noise, ns);
     }
     let d = view_depth(px);
-    // Interleaved gradient noise rotates the sample pattern per pixel.
-    let noise = fract(52.9829189 * fract(dot(v.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
     let r = p.size.y * 0.045;
     var occ = 0.0;
-    let n = 12;
-    for (var i = 0; i < n; i = i + 1) {
+    for (var i = 0; i < ns; i = i + 1) {
         let fi = f32(i);
         let a = (fi + noise) * 2.3999632;
-        let rr = r * sqrt((fi + 0.5) / f32(n));
+        let rr = r * sqrt((fi + 0.5) / f32(ns));
         let o = vec2<f32>(cos(a), sin(a)) * rr;
         let ds = view_depth(px + vec2<i32>(o));
         let diff = (d - ds) / d;
@@ -332,25 +327,73 @@ fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
             occ = occ + 1.0 - smoothstep(0.08, 0.25, diff);
         }
     }
-    let ao = 1.0 - p.strength * occ / f32(n);
-    return vec4<f32>(vec3<f32>(clamp(ao, 0.0, 1.0)), 1.0);
+    let ao = 1.0 - p.strength * occ / f32(ns);
+    return clamp(ao, 0.0, 1.0);
 }
 
-// Separable blur of the AO, edge-aware by depth. The second pass writes the
-// AO as a colour, multiplied onto the image (blend: dst × src).
+// Interleaved gradient noise: rotates the sample pattern per AO pixel.
+fn ao_noise(pos: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(pos, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+@fragment
+fn fs_ao(v: VOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(vec3<f32>(ao_at(vec2<i32>(v.pos.xy), ao_noise(v.pos.xy), 12)), 1.0);
+}
+
+// Half resolution: each AO pixel is the AO of the target pixel at twice its
+// position.
+@fragment
+fn fs_ao_half(v: VOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(vec3<f32>(ao_at(2 * vec2<i32>(v.pos.xy), ao_noise(v.pos.xy), 12)), 1.0);
+}
+
+// Separable blur of the AO (in AO pixels), edge-aware by depth. At full
+// resolution the second pass writes the AO as a colour, multiplied onto the
+// image (blend: dst × src).
 @fragment
 fn fs_ao_blur(v: VOut) -> @location(0) vec4<f32> {
+    let k = i32(max(p.stride, 1u));
+    let last = vec2<i32>(textureDimensions(src)) - vec2<i32>(1);
     let px = vec2<i32>(v.pos.xy);
-    let d0 = view_depth(px);
+    let d0 = view_depth(px * k);
     var sum = 0.0;
     var wsum = 0.0;
     for (var i = -4; i <= 4; i = i + 1) {
-        let q = px + vec2<i32>(p.dir * f32(i));
-        let w = exp(-f32(i * i) / 8.0) * select(0.0, 1.0, abs(view_depth(q) - d0) / d0 < 0.05);
-        sum = sum + textureLoad(src, clamp(q, vec2<i32>(0), vec2<i32>(p.size) - vec2<i32>(1)), 0).r * w;
+        let q = clamp(px + vec2<i32>(p.dir * f32(i)), vec2<i32>(0), last);
+        let w = exp(-f32(i * i) / 8.0) * select(0.0, 1.0, abs(view_depth(q * k) - d0) / d0 < 0.05);
+        sum = sum + textureLoad(src, q, 0).r * w;
         wsum = wsum + w;
     }
     return vec4<f32>(vec3<f32>(sum / max(wsum, 1e-4)), 1.0);
+}
+
+// Half resolution: this pixel's AO from the four nearest AO pixels, weighted
+// by distance and by how near their view depth is to this pixel's (so the
+// AO does not cross depth edges), multiplied onto the image.
+@fragment
+fn fs_ao_up(v: VOut) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(v.pos.xy);
+    if (textureLoad(depth, px, 0) <= 1e-6) {
+        return vec4<f32>(1.0);
+    }
+    let d0 = view_depth(px);
+    let base = px / 2;
+    // 0 on an AO pixel's own target pixel, else halfway to the next.
+    let f = vec2<f32>(px - base * 2) * 0.5;
+    let last = vec2<i32>(textureDimensions(src)) - vec2<i32>(1);
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var j = 0; j < 4; j = j + 1) {
+        let o = vec2<i32>(j & 1, j >> 1u);
+        let q = min(base + o, last);
+        let fo = vec2<f32>(o);
+        let wb = mix(1.0 - f.x, f.x, fo.x) * mix(1.0 - f.y, f.y, fo.y);
+        let w = wb / (1e-3 + abs(view_depth(2 * q) - d0) / d0);
+        sum = sum + textureLoad(src, q, 0).r * w;
+        wsum = wsum + w;
+    }
+    return vec4<f32>(vec3<f32>(sum / max(wsum, 1e-8)), 1.0);
 }
 
 // ---------------------------------------------------------------- camera

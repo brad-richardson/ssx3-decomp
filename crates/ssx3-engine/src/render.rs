@@ -269,7 +269,11 @@ pub fn gfx_options(s: &dyn Settings) -> ssx3_gfx::Options {
         lod_bias: get("SSX3_LOD_BIAS")
             .and_then(|v| v.parse::<f32>().ok())
             .map_or(0.0, |b| b.clamp(-2.0, 2.0)),
-        ao: on("SSX3_AO"),
+        ao: match get("SSX3_AO").as_deref() {
+            Some("fast") => ssx3_gfx::Ao::Fast,
+            Some(v) if v != "0" => ssx3_gfx::Ao::Full,
+            _ => ssx3_gfx::Ao::Off,
+        },
         shadows: on("SSX3_SHADOWS"),
         bloom: match get("SSX3_BLOOM").as_deref() {
             Some("modern") => ssx3_gfx::Bloom::Modern,

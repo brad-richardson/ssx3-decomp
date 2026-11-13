@@ -110,7 +110,7 @@ pub const ITEMS: &[Item] = &[
     Item {
         key: "SSX3_AO",
         label: "Ambient occlusion",
-        choices: &[("", "Off"), ("1", "On")],
+        choices: &[("", "Off"), ("fast", "Fast"), ("1", "Full")],
         live: true,
     },
     Item {

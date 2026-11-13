@@ -12,6 +12,18 @@ pub enum Aa {
     Fxaa,
 }
 
+/// Screen-space ambient occlusion on the 3D image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ao {
+    #[default]
+    Off,
+    /// At half resolution (each AO pixel covers 2×2 pixels), sharpened back
+    /// to the full image along depth edges.
+    Fast,
+    /// At full resolution.
+    Full,
+}
+
 /// The bloom pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Bloom {
@@ -29,8 +41,7 @@ pub struct Options {
     pub aa: Aa,
     /// Texture LOD bias (negative: sharper).
     pub lod_bias: f32,
-    /// Screen-space ambient occlusion on the 3D image.
-    pub ao: bool,
+    pub ao: Ao,
     /// Sun shadows (shadow maps, shadow.rs): the terrain lit by the
     /// renderer (sun, sky, these shadows) instead of the game's baked
     /// layer (`docs/plans/terrain-lighting.md`).
@@ -45,7 +56,7 @@ impl Default for Options {
         Options {
             aa: Aa::Off,
             lod_bias: 0.0,
-            ao: false,
+            ao: Ao::Off,
             shadows: false,
             bloom: Bloom::Original,
             snow: false,
@@ -56,7 +67,11 @@ impl Default for Options {
 impl Options {
     /// Whether the renderer draws its own passes before the HUD.
     pub fn any_post(&self) -> bool {
-        self.aa != Aa::Off || self.ao || self.shadows || self.bloom == Bloom::Modern || self.snow
+        self.aa != Aa::Off
+            || self.ao != Ao::Off
+            || self.shadows
+            || self.bloom == Bloom::Modern
+            || self.snow
     }
 
     /// Whether a batch of this post pass is drawn.

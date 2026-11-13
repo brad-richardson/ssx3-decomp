@@ -9,7 +9,7 @@ same as before.
 | --- | --- | --- | --- |
 | Anti-aliasing | `SSX3_AA=fxaa` | FXAA 3.11 on the 3D image before the HUD | `post.wgsl` `fs_fxaa` |
 | Texture sharpness | `SSX3_LOD_BIAS=±n` | Texture LOD bias (textures with mipmaps: texture-pack replacements) | `draw.wgsl` `textureSampleBias` |
-| Ambient occlusion | `SSX3_AO=1` | SSAO from reconstructed world positions (12 samples in an 80 cm radius above the surface's tangent plane, edge-aware blur), multiplied into the 3D image before the game's post passes; without a terrain camera a depth-only variant | `post.wgsl` `fs_ao*`; camera = the first terrain strip call's matrix and guard mapping (`gs::Cam`), rebased near the camera (world coordinates are ≈ 10⁵ cm, too large for f32) |
+| Ambient occlusion | `SSX3_AO=1` (Full), `SSX3_AO=fast` (Fast) | SSAO from positions rebuilt from view depth (12 samples in an 80 cm radius above the surface's tangent plane, edge-aware blur), multiplied into the 3D image before the game's post passes; without a terrain camera a depth-only variant. Fast computes it for every second pixel each way and fills in the rest from the nearest ones at a similar depth | `post.wgsl` `fs_ao*`; camera = the first terrain strip call's matrix and guard mapping (`gs::Cam`), rebased near the camera (world coordinates are ≈ 10⁵ cm, too large for f32) |
 | Bloom | `SSX3_BLOOM=modern/off` | The game's bloom pass replaced by a wide soft one (bright pass above snow white, 6-level dual-filter pyramid, added in linear light), or off | the game's bloom batches are skipped by their post-pass tag (`Built::path3_post`) |
 | Snow sparkle | `SSX3_SNOW=1` | Glints on bright, unsaturated terrain texels, anchored in texture space | `draw.wgsl` flag 2048 |
 

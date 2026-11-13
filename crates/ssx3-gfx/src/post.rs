@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
-use crate::options::{Aa, Bloom, Options};
+use crate::options::{Aa, Ao, Bloom, Options};
 
 /// Pass uniforms (`P` in post.wgsl).
 #[derive(Clone, Copy, Default)]
 struct U {
     texel: [f32; 2],
-    pad: u32,
+    /// AO: target pixels per AO pixel across (2 at half resolution).
+    stride: u32,
     strength: f32,
     dir: [f32; 2],
     size: [f32; 2],
@@ -42,7 +43,7 @@ impl U {
         let mut w: Vec<u32> = vec![
             self.texel[0].to_bits(),
             self.texel[1].to_bits(),
-            self.pad,
+            self.stride,
             self.strength.to_bits(),
             self.dir[0].to_bits(),
             self.dir[1].to_bits(),
@@ -160,8 +161,8 @@ pub struct Post {
     dummy_depth: wgpu::TextureView,
     /// The shadow map's comparison sampler.
     cmp: wgpu::Sampler,
-    /// Bloom pyramid and AO buffers (the AO and its view depth), for the
-    /// size they were made for.
+    /// Bloom pyramid, for the size it was made for, and AO buffers (the AO
+    /// and its view depth).
     bloom: Vec<(wgpu::Texture, u32, u32)>,
     ao: Vec<wgpu::Texture>,
     ao_depth: Option<wgpu::Texture>,
@@ -490,21 +491,18 @@ impl Post {
         pass.draw(0..3, 0..1);
     }
 
-    /// The bloom pyramid and AO buffers for a `w`×`h` image.
+    /// The bloom pyramid for a `w`×`h` image.
     fn ensure(&mut self, dev: &wgpu::Device, w: u32, h: u32) {
         if self.size == (w, h) {
             return;
         }
         self.size = (w, h);
-        let mk = |w, h, format, label| target(dev, w, h, format, label);
         self.bloom = (1..=BLOOM_LEVELS)
             .map(|i| {
                 let (bw, bh) = ((w >> i).max(1), (h >> i).max(1));
-                (mk(bw, bh, BLOOM_FORMAT, "ssx3-gfx bloom"), bw, bh)
+                (target(dev, bw, bh, BLOOM_FORMAT, "ssx3-gfx bloom"), bw, bh)
             })
             .collect();
-        self.ao = (0..2).map(|_| mk(w, h, AO_FORMAT, "ssx3-gfx ao")).collect();
-        self.ao_depth = None;
     }
 
     fn copy(enc: &mut wgpu::CommandEncoder, from: &wgpu::Texture, to: &wgpu::Texture) {
@@ -529,7 +527,9 @@ impl Post {
         );
     }
 
-    /// Ambient occlusion onto the image (before the game's post passes).
+    /// Ambient occlusion onto the image (before the game's post passes), at
+    /// `level` (not [`Ao::Off`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn ao(
         &mut self,
         dev: &wgpu::Device,
@@ -538,12 +538,26 @@ impl Post {
         f: &Frame,
         cam: Option<&crate::gs::Cam>,
         fxy: (f32, f32),
+        level: Ao,
     ) {
-        self.ensure(dev, f.w, f.h);
+        let half = level == Ao::Fast;
+        let stride = if half { 2 } else { 1 };
+        let (aw, ah) = (f.w.div_ceil(stride), f.h.div_ceil(stride));
+        let made =
+            |t: &wgpu::Texture, w: u32, h: u32| (t.width(), t.height()) == (w.max(1), h.max(1));
+        if !self.ao.first().is_some_and(|t| made(t, aw, ah)) {
+            self.ao = (0..2)
+                .map(|_| target(dev, aw, ah, AO_FORMAT, "ssx3-gfx ao"))
+                .collect();
+        }
+        if !self.ao_depth.as_ref().is_some_and(|t| made(t, f.w, f.h)) {
+            self.ao_depth = Some(target(dev, f.w, f.h, AO_DEPTH_FORMAT, "ssx3-gfx ao depth"));
+        }
         // With the terrain camera, exact view depth (else 1 / z).
         let mut u = U {
             size: [f.w as f32, f.h as f32],
             strength: 0.75,
+            stride,
             ..Default::default()
         };
         let rays = cam.and_then(|c| Some((c, cam_matrices(c)?, ao_rays(c, fxy)?)));
@@ -561,17 +575,15 @@ impl Post {
         }
         // (No render pass has the depth attached here: it is read as is.)
         let zv = f.depth.create_view(&Default::default());
-        let lin = self
-            .ao_depth
-            .get_or_insert_with(|| target(dev, f.w, f.h, AO_DEPTH_FORMAT, "ssx3-gfx ao depth"))
-            .clone();
+        let lin = self.ao_depth.clone().expect("made above");
         let lv = lin.create_view(&Default::default());
         let (a0, a1) = (self.ao[0].clone(), self.ao[1].clone());
         let (v0, v1) = (
             a0.create_view(&Default::default()),
             a1.create_view(&Default::default()),
         );
-        // The second blur pass multiplies its result onto the image.
+        // The last pass (the second blur, or the upsample at half
+        // resolution) multiplies its result onto the image.
         let apply = if show("ao") {
             Write::Rgb
         } else {
@@ -593,7 +605,7 @@ impl Post {
             dev,
             queue,
             enc,
-            "fs_ao",
+            if half { "fs_ao_half" } else { "fs_ao" },
             &a0,
             Write::All,
             None,
@@ -620,13 +632,18 @@ impl Post {
                 ..u
             },
         );
+        let (last, write) = if half {
+            (&a0, Write::All)
+        } else {
+            (f.color, apply)
+        };
         self.pass_with(
             dev,
             queue,
             enc,
             "fs_ao_blur",
-            f.color,
-            apply,
+            last,
+            write,
             Some(&v1),
             None,
             None,
@@ -637,6 +654,22 @@ impl Post {
                 ..u
             },
         );
+        if half {
+            self.pass_with(
+                dev,
+                queue,
+                enc,
+                "fs_ao_up",
+                f.color,
+                apply,
+                Some(&v0),
+                Some(&zv),
+                None,
+                None,
+                Some(&lv),
+                u,
+            );
+        }
     }
 
     /// Sun shadows onto the image (before the game's post passes): `smap`
