@@ -8,7 +8,7 @@ name: Progress chart
 # (tools/purpose_map.py header) and let this job refresh the SVG.
 on:
   push:
-    branches: [main]
+    branches: [main, ci/progress-1-proof]
     # The SVG itself is excluded: the job's own commit touches only it, so a
     # refresh never retriggers the job.
     paths:
@@ -18,6 +18,7 @@ on:
       - generated/purpose.tsv
       - tools/progress.py
       - tools/purpose_map.py
+      - .github/workflows/progress.yml
   workflow_dispatch:
 
 concurrency:
