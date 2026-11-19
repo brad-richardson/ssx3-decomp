@@ -25,9 +25,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The refresh commits the SVG back to main.
+# The refresh pushes with a deploy key (secret PROGRESS_DEPLOY_KEY) that the
+# main ruleset lets bypass the pull-request rule; a separate ruleset with no
+# bypass still blocks force-pushes and deletion for everyone, the key included.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   progress:
@@ -36,6 +38,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          ssh-key: ${{ secrets.PROGRESS_DEPLOY_KEY }}
 
       - name: Refresh the progress chart
         run: python3 tools/progress.py
@@ -51,3 +55,21 @@ jobs:
             git commit -m "Update the progress chart"
             git push
           fi
+
+      # Proof only (not in the PR): the key cannot rewrite history, and the
+      # default token cannot push past the review rule.
+      - name: "Proof: force-push with the key is rejected"
+        run: |
+          if git push --force origin HEAD~1:refs/heads/ci/progress-1-proof; then
+            echo "UNEXPECTED: force-push accepted"; exit 1
+          fi
+          echo "force-push rejected as expected"
+      - name: "Proof: a token push is rejected"
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git commit --allow-empty -m "proof: token push"
+          if git push "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}" HEAD:refs/heads/ci/progress-1-proof; then
+            echo "UNEXPECTED: token push accepted"; exit 1
+          fi
+          echo "token push rejected as expected"
